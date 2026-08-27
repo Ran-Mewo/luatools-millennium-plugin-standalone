@@ -83,5 +83,8 @@ logs/
 CLAUDE.md
 .millennium
 rat.py
-scripts/
-*.md
+node_modules/
+luatools.star
+.millennium/lsp/
+.specstory/
+.cursorindexingignore

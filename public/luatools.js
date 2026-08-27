@@ -67,8 +67,7 @@
             transition: transform 0.15s ease, background-color 0.15s ease !important;
         }
 
-        .luatools-button.active-focus,
-        .luatools-restart-button.active-focus {
+        .luatools-button.active-focus {
             transform: scale(1.05) !important;
             background: linear-gradient(135deg, rgba(102, 192, 244, 0.3), rgba(102, 192, 244, 0.2)) !important;
         }
@@ -524,13 +523,7 @@
 (function () {
   "use strict";
 
-  // Guard against re-injection into a still-alive JS context. CefInjectorService (LuaLoader mode)
-  // re-injects this whole script whenever window.__LuaToolsReady isn't true yet — which can happen
-  // while THIS injection's own async setup is still in flight (see the retry loop in
-  // addLuaToolsButton() and where __LuaToolsReady actually gets set, near the end of this IIFE). Without
-  // this guard, a second injection into the same live realm would throw "Identifier already declared"
-  // on every top-level const below. A real navigation creates a brand-new JS realm with no such flag,
-  // so this only ever blocks *redundant* re-injection, never a genuinely fresh page load.
+  // Avoid declaring the same top-level bindings twice in one webkit context.
   if (window.__LuaToolsInjected) return;
   window.__LuaToolsInjected = true;
 
@@ -593,97 +586,10 @@
     return "en";
   }
 
-  // ============================================================
-  // LuaTools GUI backend shim
-  // ------------------------------------------------------------
-  // The old Lua/Millennium backend is gone. The LuaTools GUI desktop app is now
-  // the real backend, reached over HTTP on 127.0.0.1:6767. The page can't fetch()
-  // that directly (mixed content), so every RPC routes through the CDP bridge
-  // (window.Millennium, defined by the CEF injector's polyfill), which makes the
-  // real HTTP call from the app process. We declare a LOCAL `Millennium` here that
-  // shadows the shared global only inside this IIFE — so other Millennium plugins
-  // keep their real callServerMethod untouched — and map each legacy RPC name to a
-  // bridge call. Every call site consumes the result as
-  // `typeof res === "string" ? JSON.parse(res) : res`, so returning a plain object
-  // (not a JSON string) is safe. See plan: the app owns everything backend-related;
-  // the plugin only reflects state and triggers app actions.
-  // ============================================================
-  const Millennium = (function () {
-    const aid = (a) =>
-      a && typeof a === "object" ? (a.appid ?? a.appId ?? a.id) : a;
+  // Millennium provides the Lua backend bridge in the webkit context.
+  const Millennium = window.Millennium;
 
-    // Raw fetch() to 127.0.0.1 from this HTTPS page is blocked as mixed content.
-    // Route through the CDP bridge (window.Millennium, defined by the CEF injector's
-    // polyfill) instead, which makes the real HTTP call from the app process itself.
-    const call = (method, args) =>
-      window.Millennium.callServerMethod("luatools", method, args || {}).then(
-        (res) => (typeof res === "string" ? JSON.parse(res) : res),
-      );
 
-    const map = {
-      // ── Real endpoints (LuaTools GUI HTTP server) ──
-      HasLuaToolsForApp: (a) => call("HasLuaToolsForApp", { appid: aid(a) }),
-      DeleteLuaToolsForApp: (a) => call("DeleteLuaToolsForApp", { appid: aid(a) }),
-      CancelAddViaLuaTools: (a) => call("CancelAddViaLuaTools", { appid: aid(a) }),
-      RestartSteam: () => call("RestartSteam", {}),
-      OpenExternalUrl: (a) => call("OpenExternalUrl", { url: a && a.url }),
-      CheckForUpdatesNow: () => call("CheckForUpdatesNow", {}),
-      ReadLoadedApps: () => call("ReadLoadedApps", {}),
-      DismissLoadedApps: () => call("DismissLoadedApps", {}),
-      // GetSettingsConfig is a DATA fetch the frontend runs on load — it must NOT
-      // open anything (the Settings *button* opens the app via /open/settings).
-      // Return a benign empty config so settings loading succeeds silently.
-      GetSettingsConfig: () => {
-        const lang = ltResolveLang();
-        return Promise.resolve({
-          success: true,
-          schemaVersion: 0,
-          schema: [],
-          values: {},
-          language: lang,
-          locales: Object.keys(LT_LOCALES),
-          translations: ltGetLocaleStrings(lang),
-        });
-      },
-
-      // ── Client-side stubs (subsystems fully owned by the app) ──
-      // Translations are embedded in this file (LT_LOCALES) — no backend needed.
-      GetTranslations: (a) => {
-        const lang = ltResolveLang(a && (a.language || a.lang));
-        return Promise.resolve({
-          success: true,
-          strings: ltGetLocaleStrings(lang),
-          language: lang,
-          locales: Object.keys(LT_LOCALES),
-        });
-      },
-      GetGamesDatabase: () => Promise.resolve({ success: true, database: {} }),
-      GetThemes: () => Promise.resolve({ success: true, themes: [] }),
-      GetIconDataUrl: () => Promise.resolve({ success: true, dataUrl: "data:image/png;base64,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" }),
-      CheckForFixes: () =>
-        Promise.resolve({ success: true, hasFix: false, fixes: [] }),
-
-      // ── API subsystem: mostly app-owned. ──
-      GetInitApisMessage: () => Promise.resolve({ success: true, message: "" }),
-    };
-
-    return {
-      callServerMethod: function (plugin, method, args) {
-        const h = map[method];
-        if (h) {
-          try {
-            return Promise.resolve(h(args));
-          } catch (e) {
-            return Promise.resolve({ success: false, error: String(e) });
-          }
-        }
-        // Unknown method → benign success so no call site rejects.
-        return Promise.resolve({ success: true });
-      },
-    };
-  })();
-
-  // Big Picture Mode Detector - Multi-method system for maximum reliability
   function isBigPictureMode() {
     const htmlClasses = document.documentElement.className;
     const userAgent = navigator.userAgent;
@@ -726,20 +632,7 @@
 
   // Forward logs to Millennium backend so they appear in the dev console
   function backendLog(message) {
-    try {
-      if (
-        typeof Millennium !== "undefined" &&
-        typeof Millennium.callServerMethod === "function"
-      ) {
-        Millennium.callServerMethod("luatools", "Logger.log", {
-          message: String(message),
-        });
-      }
-    } catch (err) {
-      if (typeof console !== "undefined" && console.warn) {
-        console.warn("[LuaTools] backendLog failed", err);
-      }
-    }
+    if (typeof console !== "undefined" && console.debug) console.debug("[LuaTools]", message);
   }
 
   // Read the game name straight off the store page so the backend can skip a lua.tools /details
@@ -763,9 +656,6 @@
     runState.inProgress = true;
     runState.appid = appid;
     showTestPopup();
-    // Raw fetch() to 127.0.0.1 is blocked as mixed content on this HTTPS store page;
-    // route through the CDP bridge (window.Millennium -> CefInjectorService -> HttpClient)
-    // instead, which makes the actual HTTP call from the app process, not the browser.
     window.Millennium.callServerMethod("luatools", "StartLuaToolsAdd", {
       appid,
       name: getPageGameName(),
@@ -1151,28 +1041,6 @@
     }
   }
 
-  function loadThemesFromFile() {
-    try {
-      return fetch("themes/themes.json", {
-        cache: "no-store",
-      })
-        .then(function (res) {
-          if (!res || !res.ok) return null;
-          return res.json();
-        })
-        .then(function (json) {
-          if (!json) return null;
-          _applyBackendThemes(json);
-          return json;
-        })
-        .catch(function () {
-          return null;
-        });
-    } catch (_) {
-      return Promise.resolve(null);
-    }
-  }
-
   function loadThemesFromBackend() {
     if (
       typeof Millennium === "undefined" ||
@@ -1199,18 +1067,24 @@
   }
 
   function loadThemes() {
-    return Promise.all([loadThemesFromFile(), loadThemesFromBackend()]).catch(
-      function () {
-        /* ignore */
-      },
-    );
+    return loadThemesFromBackend();
   }
 
   // Trigger load (non-blocking). Keeps DEFAULT_THEMES as a safe fallback.
   loadThemes();
 
+  function getStoredThemeKey() {
+    try {
+      return localStorage.getItem("luatools-theme") || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
   function getCurrentThemeKey() {
     try {
+      const storedTheme = getStoredThemeKey();
+      if (storedTheme) return storedTheme;
       const settings = window.__LuaToolsSettings || {};
       const themeKey = (settings.values || {}).general || {};
       return themeKey.theme || "original";
@@ -1472,38 +1346,11 @@
         `;
   }
 
-  function ensureThemeStylesheet(themeKey) {
-    const id = "luatools-theme-css";
-    const href = "themes/" + themeKey + ".css";
-    const link = document.getElementById(id);
-    if (link) {
-      const currentTheme = link.getAttribute("data-theme");
-      if (currentTheme === themeKey) return;
-      link.href = href;
-      link.setAttribute("data-theme", themeKey);
-      return;
-    }
-    try {
-      const el = document.createElement("link");
-      el.id = id;
-      el.rel = "stylesheet";
-      el.href = href;
-      el.setAttribute("data-theme", themeKey);
-      document.head.appendChild(el);
-    } catch (err) {
-      backendLog("LuaTools: Theme CSS injection failed: " + err);
-    }
-  }
-
   function ensureLuaToolsStyles() {
     const styleEl = document.getElementById("luatools-styles");
     const themeKey = getCurrentThemeKey();
     const theme = getCurrentTheme();
     const styles = generateThemeStyles(theme);
-
-    try {
-      ensureThemeStylesheet(themeKey);
-    } catch (_) {}
 
     if (styleEl) {
       styleEl.textContent = styles;
@@ -1535,6 +1382,135 @@
     } catch (err) {
       backendLog("LuaTools: Font Awesome injection failed: " + err);
     }
+  }
+
+  function showSettingsManagerPopup(forceRefresh, onBack) {
+    closeSettingsOverlay();
+    ensureLuaToolsStyles();
+    ensureFontAwesome();
+
+    const values = (((window.__LuaToolsSettings || {}).values || {}).general) || {};
+    const overlay = document.createElement("div");
+    overlay.className = "luatools-settings-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.8);backdrop-filter:blur(12px);z-index:99999;display:flex;align-items:center;justify-content:center;";
+
+    const colors = getThemeColors();
+    const modal = document.createElement("div");
+    modal.style.cssText = `position:relative;background:${colors.modalBg};color:${colors.text};border:1px solid ${colors.border};border-radius:16px;width:460px;padding:20px 24px;box-shadow:0 24px 80px rgba(0,0,0,.65), 0 0 0 1px ${colors.shadowRgba};animation:slideUp 0.12s ease-out;`;
+
+    const header = document.createElement("div");
+    header.style.cssText = `display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid ${colors.borderRgba};`;
+
+    const title = document.createElement("div");
+    title.style.cssText = `font-size:22px;color:${colors.text};font-weight:600;`;
+    title.textContent = t("settings.title", "LuaTools · Settings");
+
+    const closeBtn = document.createElement("a");
+    closeBtn.href = "#";
+    closeBtn.className = "luatools-btn";
+    closeBtn.innerHTML = "<span>" + t("settings.close", "Close") + "</span>";
+    closeBtn.onclick = function (e) {
+      e.preventDefault();
+      overlay.remove();
+      if (typeof onBack === "function") onBack();
+    };
+
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    const body = document.createElement("div");
+    body.style.cssText = "display:flex;flex-direction:column;gap:16px;";
+
+    function label(text) {
+      const el = document.createElement("span");
+      el.style.cssText = `font-size:14px;color:${colors.text};font-weight:600;`;
+      el.textContent = text;
+      return el;
+    }
+
+    const themeRow = document.createElement("label");
+    themeRow.style.cssText = "display:flex;flex-direction:column;gap:8px;font-size:14px;";
+    const themeSelect = document.createElement("select");
+    themeSelect.style.cssText = `background:${colors.bgTertiary};color:${colors.text};border:1px solid ${colors.border};border-radius:6px;padding:8px;`;
+    Object.keys(THEMES).forEach(function (key) {
+      const option = document.createElement("option");
+      option.value = key;
+      option.textContent = THEMES[key].name || key;
+      if (key === (values.theme || getCurrentThemeKey())) option.selected = true;
+      themeSelect.appendChild(option);
+    });
+    themeSelect.onchange = function () {
+      try {
+        localStorage.setItem("luatools-theme", themeSelect.value);
+      } catch (_) {}
+      window.__LuaToolsSettings = window.__LuaToolsSettings || { values: {} };
+      window.__LuaToolsSettings.values = window.__LuaToolsSettings.values || {};
+      window.__LuaToolsSettings.values.general = window.__LuaToolsSettings.values.general || {};
+      window.__LuaToolsSettings.values.general.theme = themeSelect.value;
+      ensureLuaToolsStyles();
+    };
+    themeRow.appendChild(label(t("settings.theme.label", "Theme")));
+    themeRow.appendChild(themeSelect);
+
+    const fastFetchRow = document.createElement("label");
+    fastFetchRow.style.cssText = `display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid ${colors.borderRgba};border-radius:10px;background:rgba(${colors.rgbString},0.06);`;
+    const fastFetchText = document.createElement("div");
+    fastFetchText.innerHTML = `<div style="font-size:14px;font-weight:600;color:${colors.text};">${t("settings.fastDownload.label", "Fast Download")}</div><div style="font-size:12px;color:${colors.textSecondary};margin-top:4px;">${t("settings.fastDownload.description", "Automatically choose the first available source when adding a game.")}</div>`;
+    const fastFetchInput = document.createElement("input");
+    fastFetchInput.type = "checkbox";
+    fastFetchInput.checked = values.fastFetch !== false;
+    fastFetchRow.appendChild(fastFetchText);
+    fastFetchRow.appendChild(fastFetchInput);
+
+    const keyRow = document.createElement("label");
+    keyRow.style.cssText = "display:flex;flex-direction:column;gap:8px;font-size:14px;";
+    const keyInput = document.createElement("input");
+    keyInput.type = "password";
+    keyInput.value = values.morrenusApiKey || "";
+    keyInput.placeholder = t("settings.morrenusApiKey.placeholder", "Enter your API Key");
+    keyInput.style.cssText = `background:${colors.bgTertiary};color:${colors.text};border:1px solid ${colors.border};border-radius:6px;padding:8px;`;
+    keyRow.appendChild(label(t("settings.morrenusApiKey.label", "Morrenus API Key")));
+    keyRow.appendChild(keyInput);
+
+    const saveBtn = document.createElement("a");
+    saveBtn.href = "#";
+    saveBtn.className = "luatools-btn primary";
+    saveBtn.style.cssText = "display:flex;align-items:center;justify-content:center;text-align:center;";
+    saveBtn.innerHTML = "<span>" + t("settings.save", "Save Settings") + "</span>";
+    saveBtn.onclick = function (e) {
+      e.preventDefault();
+      const changes = {
+        theme: themeSelect.value,
+        fastFetch: fastFetchInput.checked,
+        morrenusApiKey: keyInput.value,
+        useSteamLanguage: values.useSteamLanguage !== false,
+      };
+      Millennium.callServerMethod("luatools", "ApplySettingsChanges", {
+        changesJson: JSON.stringify(changes),
+        contentScriptQuery: "",
+      }).then(function (res) {
+        const payload = typeof res === "string" ? JSON.parse(res) : res;
+        if (!payload || payload.success !== true) throw new Error((payload && payload.error) || t("settings.saveError", "Failed to save settings."));
+        window.__LuaToolsSettings = window.__LuaToolsSettings || { values: {} };
+        window.__LuaToolsSettings.values = payload.values || { general: changes };
+        try {
+          localStorage.setItem("luatools-theme", themeSelect.value);
+        } catch (_) {}
+        ensureLuaToolsStyles();
+        ShowLuaToolsAlert("LuaTools", t("settings.saveSuccess", "Settings saved successfully."));
+      }).catch(function (err) {
+        ShowLuaToolsAlert("LuaTools", err && err.message ? err.message : t("settings.saveError", "Failed to save settings."));
+      });
+    };
+
+    body.appendChild(themeRow);
+    body.appendChild(fastFetchRow);
+    body.appendChild(keyRow);
+    body.appendChild(saveBtn);
+    modal.appendChild(header);
+    modal.appendChild(body);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
   }
 
   function showSettingsPopup() {
@@ -1582,17 +1558,10 @@
           }).then(function (res) {
             try {
               const p = typeof res === "string" ? JSON.parse(res) : res;
-              titleIcon.src =
-                p && p.success && p.dataUrl
-                  ? p.dataUrl
-                  : "LuaTools/luatools-icon.png";
-            } catch (_) {
-              titleIcon.src = "LuaTools/luatools-icon.png";
-            }
+              if (p && p.success && p.dataUrl) titleIcon.src = p.dataUrl;
+            } catch (_) {}
           });
-        } catch (_) {
-          titleIcon.src = "LuaTools/luatools-icon.png";
-        }
+        } catch (_) {}
         titleIcon.onerror = function () {
           this.style.display = "none";
         };
@@ -1815,52 +1784,22 @@
         }
 
         if (settingsManagerBtn) {
-          // Settings are managed entirely in the LuaTools app — open its Settings
-          // page directly instead of rendering an in-plugin settings modal.
           settingsManagerBtn.addEventListener("click", function (e) {
             e.preventDefault();
             try {
               overlay.remove();
             } catch (_) {}
-            window.Millennium.callServerMethod("luatools", "OpenSettings", {}).catch(
-              function () {},
-            );
+            showSettingsManagerPopup(false, showSettingsPopup);
           });
         }
 
         if (fixesMenuBtn) {
-          // Fixes are managed entirely in the LuaTools app — open its Fixes page
-          // for this game directly instead of the in-plugin fixes flow.
           fixesMenuBtn.addEventListener("click", function (e) {
             e.preventDefault();
             try {
-              const match =
-                window.location.href.match(
-                  /https:\/\/store\.steampowered\.com\/app\/(\d+)/,
-                ) ||
-                window.location.href.match(
-                  /https:\/\/steamcommunity\.com\/app\/(\d+)/,
-                );
-              const appid = match
-                ? parseInt(match[1], 10)
-                : window.__LuaToolsCurrentAppId || NaN;
-              try {
-                overlay.remove();
-              } catch (_) {}
-              if (isNaN(appid)) {
-                const errText = t(
-                  "menu.error.noAppId",
-                  "Could not determine game AppID",
-                );
-                ShowLuaToolsAlert("LuaTools", errText);
-                return;
-              }
-              window.Millennium.callServerMethod("luatools", "OpenFix", { appid }).catch(
-                function () {},
-              );
-            } catch (err) {
-              backendLog("LuaTools: Fixes Menu button error: " + err);
-            }
+              overlay.remove();
+            } catch (_) {}
+            ShowLuaToolsAlert("LuaTools", t("No online-fix", "No online-fix"));
           });
         }
 
@@ -2077,24 +2016,6 @@
 
   // Translations are loaded by fetchSettingsConfig() in onFrontendReady — no separate preload needed.
 
-  function askRestartConfirmation() {
-    showLuaToolsConfirm(
-      "LuaTools",
-      lt("Restart Steam now?"),
-      function () {
-        try {
-          Millennium.callServerMethod("luatools", "RestartSteam", {
-            contentScriptQuery: "",
-          });
-          // SteamClient.User.StartRestart(true) Unreliable, closes but doesn't restart (on my pc)
-        } catch (_) {}
-      },
-      function () {
-        /* Cancel - do nothing */
-      },
-    );
-  }
-
   let settingsMenuPending = false;
 
   // Helper: show a Steam-style popup with a 10s loading bar (custom UI)
@@ -2205,7 +2126,6 @@
 
     function cleanup() {
       // The status poll (setInterval in startLuaToolsAdd) lives in another scope — this is the only place a
-      // cancel/close can reach it. Skipping this leaks the timer and floods the CDP bridge (picker hangs).
       if (runState.pollTimer) { clearInterval(runState.pollTimer); runState.pollTimer = null; }
       overlay.remove();
     }
@@ -2506,7 +2426,6 @@
       const style = document.createElement("style");
       style.id = "luatools-spacing-styles";
       style.textContent = `
-                .luatools-restart-button { margin-left: 0 !important; margin-right: 3px !important; }
                 .luatools-button { margin-left: 0 !important; margin-right: 0 !important; position: relative !important; }
                 .luatools-pills-container {
                     position: absolute !important;
@@ -2546,19 +2465,6 @@
   // Function to update button text with current translations
   function updateButtonTranslations() {
     try {
-      // Update Restart Steam button
-      const restartBtn = document.querySelector(".luatools-restart-button");
-      if (restartBtn) {
-        const restartText = lt("Restart Steam");
-        restartBtn.title = restartText;
-        restartBtn.setAttribute("data-tooltip-text", restartText);
-        const rspan = restartBtn.querySelector("span");
-        if (rspan) {
-          rspan.textContent = restartText;
-        }
-      }
-
-      // Update Add via LuaTools button
       const luatoolsBtn = document.querySelector(".luatools-button");
       if (luatoolsBtn) {
         const label = lt("Add via LuaTools");
@@ -2596,7 +2502,6 @@
       window.__LuaToolsLastUrl = currentUrl;
       window.__LuaToolsButtonInserted = false;
       window.__LuaToolsGameAdded = false;
-      window.__LuaToolsRestartInserted = false;
       window.__LuaToolsIconInserted = false;
       window.__LuaToolsHeaderInserted = false;
       window.__LuaToolsPresenceCheckInFlight = false;
@@ -2632,8 +2537,6 @@
         headerBtn.innerHTML =
           '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="LuaTools"><path fill="currentColor" d="M12 8a4 4 0 100 8 4 4 0 000-8zm9.94 3.06l-2.12-.35a7.962 7.962 0 00-1.02-2.46l1.29-1.72a.75.75 0 00-.09-.97l-1.41-1.41a.75.75 0 00-.97-.09l-1.72 1.29c-.77-.44-1.6-.78-2.46-1.02L13.06 2.06A.75.75 0 0012.31 2h-1.62a.75.75 0 00-.75.65l-.35 2.12a7.962 7.962 0 00-2.46 1.02L5 4.6a.75.75 0 00-.97.09L2.62 6.1a.75.75 0 00-.09.97l1.29 1.72c-.44.77-.78 1.6-1.02 2.46l-2.12.35a.75.75 0 00-.65.75v1.62c0 .37.27.69.63.75l2.14.36c.24.86.58 1.69 1.02 2.46L2.53 18a.75.75 0 00.09.97l1.41 1.41c.26.26.67.29.97.09l1.72-1.29c.77.44 1.6.78 2.46 1.02l.35 2.12c.06.36.38.63.75.63h1.62c.37 0 .69-.27.75-.63l.36-2.14c.86-.24 1.69-.58 2.46-1.02l1.72 1.29c.3.2.71.17.97-.09l1.41-1.41c.26-.26.29-.67.09-.97l-1.29-1.72c.44-.77.78-1.6 1.02-2.46l2.12-.35c.36-.06.63-.38.63-.75v-1.62a.75.75 0 00-.65-.75z"/></svg>';
       };
-
-      img.src = "LuaTools/luatools-icon.png";
 
       Millennium.callServerMethod("luatools", "GetIconDataUrl", {})
         .then(function (res) {
@@ -2679,7 +2582,7 @@
       // Keep our buttons in a deterministic spot. This row is filled asynchronously — Steam
       // injects the external-site links and Community Hub AFTER page load (and the SteamDB
       // extension its icon), which used to leave our buttons wherever they first landed,
-      // different on every load. Pin [Restart][Add] as the last two children, and keep them
+      // different on every load. Pin Add as the last child, and keep it
       // pinned with a MutationObserver so late insertions don't shuffle them — the bounded
       // ~7s insertion poll stops firing after the page is "ready", but Steam's link injection
       // can happen after that, so a one-shot re-assert isn't enough. ltPinButtons only moves
@@ -2687,16 +2590,8 @@
       // already ordered → no move) instead of looping.
       const ltPinButtons = function (c) {
         try {
-          const rb = c.querySelector(".luatools-restart-button");
           const ab = c.querySelector(".luatools-button");
-          if (rb && ab) {
-            if (rb.nextElementSibling !== ab || c.lastElementChild !== ab) {
-              c.appendChild(rb);
-              c.appendChild(ab);
-            }
-          } else if (rb && c.lastElementChild !== rb) {
-            c.appendChild(rb);
-          }
+          if (ab && c.lastElementChild !== ab) c.appendChild(ab);
         } catch (_) {}
       };
       ltPinButtons(steamdbContainer);
@@ -2709,63 +2604,6 @@
           window.__LuaToolsOrderObservedEl = steamdbContainer;
         } catch (_) {}
       }
-
-      // Insert a Restart Steam button between Community Hub and our LuaTools button
-      try {
-        if (
-          !document.querySelector(".luatools-restart-button") &&
-          !window.__LuaToolsRestartInserted
-        ) {
-          ensureStyles();
-          // In Big Picture mode, use queue button as reference; otherwise use first link in container
-          const referenceBtn = isBigPicture
-            ? document.querySelector("#queueBtnFollow")
-            : steamdbContainer.querySelector("a");
-
-          // Use same custom button for both modes
-          const restartBtn = document.createElement("a");
-          if (referenceBtn && referenceBtn.className) {
-            restartBtn.className =
-              referenceBtn.className + " luatools-restart-button";
-          } else {
-            restartBtn.className =
-              "btnv6_blue_hoverfade btn_medium luatools-restart-button";
-          }
-          restartBtn.href = "#";
-          const restartText = lt("Restart Steam");
-          restartBtn.title = restartText;
-          restartBtn.setAttribute("data-tooltip-text", restartText);
-          const rspan = document.createElement("span");
-          rspan.textContent = restartText;
-          restartBtn.appendChild(rspan);
-
-          // Normalize margins to match native buttons
-          try {
-            if (referenceBtn) {
-              const cs = window.getComputedStyle(referenceBtn);
-              restartBtn.style.marginLeft = cs.marginLeft;
-              restartBtn.style.marginRight = cs.marginRight;
-            }
-          } catch (_) {}
-
-          restartBtn.addEventListener("click", function (e) {
-            e.preventDefault();
-            try {
-              // Ensure any settings overlays are closed before confirm
-              closeSettingsOverlay();
-              askRestartConfirmation();
-            } catch (_) {
-              askRestartConfirmation();
-            }
-          });
-
-          // Append to the end of the row (the re-assert block above keeps it pinned there)
-          // instead of after whatever link happens to be first at this instant.
-          steamdbContainer.appendChild(restartBtn);
-          window.__LuaToolsRestartInserted = true;
-          backendLog("Inserted Restart Steam button");
-        }
-      } catch (_) {}
 
       // Status Pills Logic
       // Always update translations for existing buttons (even if not a page change)
@@ -2876,13 +2714,7 @@
                   !document.querySelector(".luatools-button") &&
                   !window.__LuaToolsButtonInserted
                 ) {
-                  // Insert after restart button (order: Restart → Add)
-                  const restartExisting = steamdbContainer.querySelector(
-                    ".luatools-restart-button",
-                  );
-                  if (restartExisting && restartExisting.after) {
-                    restartExisting.after(luatoolsButton);
-                  } else if (referenceBtn && referenceBtn.after) {
+                  if (referenceBtn && referenceBtn.after) {
                     referenceBtn.after(luatoolsButton);
                   } else {
                     steamdbContainer.appendChild(luatoolsButton);
@@ -2918,13 +2750,7 @@
               !document.querySelector(".luatools-button") &&
               !window.__LuaToolsButtonInserted
             ) {
-              // Insert after restart button (order: Restart → Add)
-              const restartExisting = steamdbContainer.querySelector(
-                ".luatools-restart-button",
-              );
-              if (restartExisting && restartExisting.after) {
-                restartExisting.after(luatoolsButton);
-              } else if (referenceBtn && referenceBtn.after) {
+              if (referenceBtn && referenceBtn.after) {
                 referenceBtn.after(luatoolsButton);
               } else {
                 steamdbContainer.appendChild(luatoolsButton);
@@ -2938,12 +2764,7 @@
             !document.querySelector(".luatools-button") &&
             !window.__LuaToolsButtonInserted
           ) {
-            const restartExisting = steamdbContainer.querySelector(
-              ".luatools-restart-button",
-            );
-            if (restartExisting && restartExisting.after) {
-              restartExisting.after(luatoolsButton);
-            } else if (referenceBtn && referenceBtn.after) {
+            if (referenceBtn && referenceBtn.after) {
               referenceBtn.after(luatoolsButton);
             } else {
               steamdbContainer.appendChild(luatoolsButton);
@@ -3084,12 +2905,6 @@
   // .apphub_OtherSiteInfo (store button) when our script first runs — a one-shot attempt would just miss
   // them, and nothing else ever retried (checkUrlChange only re-fires on an actual URL change, not on
   // "containers appeared since last try"). Spaced past BUTTON_CHECK_THROTTLE (500ms) so each retry
-  // actually runs addLuaToolsButton's body instead of being silently throttled away.
-  //
-  // window.__LuaToolsReady only gets set once this settles (header button confirmed present, or retries
-  // exhausted) — that's the signal CefInjectorService's polling loop needs to know whether to re-inject.
-  // Setting it any earlier (as a previous version of this file did, unconditionally at the end of the
-  // IIFE) let the loop think a page was done before the button/icon had actually been created.
   function ensureLuaToolsUI(attempt) {
     attempt = attempt || 0;
     try {
@@ -3098,14 +2913,6 @@
       backendLog("LuaTools: ensureLuaToolsUI attempt " + attempt + " threw: " + err);
     }
 
-    // Mark ready once the header button is up (or retries exhausted). This is the signal
-    // CefInjectorService uses to STOP re-injecting — it must NOT be gated on the game-page
-    // "Add" button: that button's row loads later and its presence check is async, so gating
-    // ready on it keeps the page "not ready", triggering an endless re-injection loop that
-    // replaces the Millennium bridge's _pending/_readyResponses maps every cycle and orphans
-    // the in-flight presence check (button then never resolves). Instead, the game button is
-    // handled independently by the MutationObserver below, which reliably fires when the
-    // button row appears — decoupled from the ready/injection signal.
     var headerReady = !!document.querySelector(".luatools-header-button");
     if (headerReady || attempt >= 12) {
       window.__LuaToolsReady = true;
@@ -3207,19 +3014,7 @@
           try {
             const payload = typeof res === "string" ? JSON.parse(res) : res;
             if (payload && payload.message) {
-              const msg = String(payload.message);
-              // Check if this is an update message (contains "update" or "restart")
-              const isUpdateMsg =
-                msg.toLowerCase().includes("update") ||
-                msg.toLowerCase().includes("restart");
-
-              if (isUpdateMsg) {
-                // For update messages, use confirm dialog with OK (restart) and Cancel options
-                askRestartConfirmation();
-              } else {
-                // For non-update messages, use regular alert
-                ShowLuaToolsAlert("LuaTools", msg);
-              }
+              ShowLuaToolsAlert("LuaTools", String(payload.message));
             }
           } catch (_) {}
         });
@@ -3312,7 +3107,6 @@
       // URL changed - reset flags and update buttons
       window.__LuaToolsButtonInserted = false;
       window.__LuaToolsGameAdded = false;
-      window.__LuaToolsRestartInserted = false;
       window.__LuaToolsIconInserted = false;
       window.__LuaToolsHeaderInserted = false;
 
@@ -3504,15 +3298,4 @@
     }, 150);
   }
 
-  // ============================================
-  // GAMEPAD NAVIGATION INTEGRATION
-  // ============================================
-  // Note: The gamepad back handler is configured in the gamepad system at the top of this file
-  // It already handles all overlay types automatically using OVERLAY_SELECTOR_STRING
-
-  // window.__LuaToolsReady (the completion marker CefInjectorService's polling loop checks — see
-  // ensureLuaToolsUI() above) is set there once the button/icon setup actually settles, not here
-  // unconditionally. Setting it here regardless of that outcome is exactly the bug that caused pages to
-  // occasionally load with no button/icon until a manual refresh — the loop would see "ready" and stop
-  // retrying before the UI had actually been created.
 })();

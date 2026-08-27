@@ -1,0 +1,16 @@
+{
+  "name": "luatools-millennium-standalone",
+  "private": true,
+  "repository": "github:Ran-Mewo/luatools-millennium-standalone",
+  "homepage": "https://github.com/Ran-Mewo/luatools-millennium-standalone",
+  "bugs": {
+    "url": "https://github.com/Ran-Mewo/luatools-millennium-standalone/issues"
+  },
+  "scripts": {
+    "build": "starlight pack",
+    "prepare": "starlight lsp"
+  },
+  "devDependencies": {
+    "@steambrew/starlight": "^1.1.4"
+  }
+}

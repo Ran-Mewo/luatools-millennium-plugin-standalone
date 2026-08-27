@@ -1,187 +1,561 @@
--- LuaTools injector stub.
--- The real backend is the LuaTools GUI desktop app (HTTP on 127.0.0.1:6767). This lua
--- backend has two jobs:
---   1. Put luatools.js onto the Steam store webkit context (copy into steamui/webkit +
---      Millennium.add_browser_js) — delivery is backend-only in Millennium.
---   2. Be the RPC bridge between the injected page and the app. luatools.js calls
---      window.Millennium.callServerMethod("luatools", "<Name>", args) — under real
---      Millennium that dispatches here (Millennium looks up a GLOBAL Lua function named
---      exactly "<Name>", NOT a member of the table this file returns — see
---      lua_host/main.cc's handle_evaluate). Each RPC function below just relays to the
---      app's HTTP API using Millennium's own http module (server-side, so — unlike a
---      page-context fetch() — it isn't subject to the browser's mixed-content blocking).
---
--- The non-Millennium ("LuaLoader") install mode has its own equivalent bridge:
--- LuaTools GUI's CefInjectorService, which polls the injected page over CDP and makes
--- the same HTTP calls from the app process itself. Any new RPC method added to
--- luatools.js needs a handler in BOTH places, or it only works under one loader.
+local millennium = require("millennium")
+local fs = require("fs")
+local m_utils = require("utils")
+local cjson = require("json")
 
-local millennium  = require("millennium")
-local fs          = require("fs")
-local m_utils     = require("utils")
-local logger      = require("plugin_logger")
-local paths       = require("paths")
-local steam_utils = require("steam_utils")
-local http        = require("http")
-local cjson       = require("json")
+local SOURCES = {
+    {
+        name = "Morrenus",
+        url = "https://hubcapmanifest.com/api/v1/manifest/<appid>?api_key=<moapikey>",
+    },
+    {
+        name = "Ryuu",
+        url = "http://167.235.229.108/<appid>",
+    },
+    {
+        name = "TwentyTwo Cloud",
+        url = "https://api.twentytwocloud.com/download?appid=<appid>",
+    },
+    {
+        name = "Sushi",
+        url = "https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/<appid>.zip",
+    },
+}
 
--- ── App backend bridge (127.0.0.1:6767) ────────────────────────────────────────
+local DEFAULT_SETTINGS = {
+    fastFetch = true,
+    morrenusApiKey = "",
+    theme = "original",
+    useSteamLanguage = true,
+}
 
-local BACKEND_BASE = "http://127.0.0.1:6767"
+local states = {}
 
-local function backend_request(method, path, body)
-    local opts = { method = method, timeout = 15 }
-    if body then
-        opts.data = cjson.encode(body)
-        opts.headers = { ["Content-Type"] = "application/json" }
-    end
-    local response, err = http.request(BACKEND_BASE .. path, opts)
-    if not response then
-        return cjson.encode({ success = false, error = tostring(err or "request failed") })
-    end
-    return response.body
+local function encode(value)
+    local success, result = pcall(cjson.encode, value)
+    if success then return result end
+    return '{"success":false,"error":"Could not encode response"}'
 end
 
--- ── Ensure the app is running ──────────────────────────────────────────────────
--- Mirrors what the non-Millennium DLL hijack does (launch_luatools() in
--- steampluginback/src/lib.rs) — that code never runs under Millennium (Millennium owns
--- wsock32.dll instead), so nothing else brings the backend up in this mode.
-
-local function ensure_backend_running()
-    local response = http.get(BACKEND_BASE .. "/has/0", { timeout = 2 })
-    if response then return end -- already up
-
-    local local_appdata = m_utils.getenv("LOCALAPPDATA")
-    if not local_appdata or local_appdata == "" then
-        logger.warn("LOCALAPPDATA not available, cannot launch LuaTools backend")
-        return
-    end
-
-    local exe_path = local_appdata .. "\\LuaTools\\current\\LuaTools.exe"
-    if not fs.exists(exe_path) then
-        logger.warn("LuaTools.exe not found at " .. exe_path .. " (not installed?)")
-        return
-    end
-
-    -- `start` launches detached and returns immediately; utils.exec only blocks on
-    -- that, not on LuaTools.exe itself.
-    m_utils.exec('start "" "' .. exe_path .. '" --minimized')
-    logger.log("Launched LuaTools backend: " .. exe_path)
+local function error_response(message)
+    return encode({
+        success = false,
+        error = tostring(message),
+    })
 end
 
--- ── RPC handlers (must be GLOBAL functions — Millennium looks these up by name) ─
+local function base64_encode(data)
+    local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    return ((data:gsub(".", function(byte)
+        local bits = ""
+        local value = byte:byte()
+        for i = 8, 1, -1 do
+            bits = bits .. (value % 2 ^ i - value % 2 ^ (i - 1) > 0 and "1" or "0")
+        end
+        return bits
+    end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(bits)
+        if #bits < 6 then return "" end
+        local value = 0
+        for i = 1, 6 do
+            value = value + (bits:sub(i, i) == "1" and 2 ^ (6 - i) or 0)
+        end
+        return alphabet:sub(value + 1, value + 1)
+    end) .. ({ "", "==", "=" })[#data % 3 + 1])
+end
+
+local function config_get(key)
+    if not millennium.config or not millennium.config.get then return nil end
+    local success, value = pcall(millennium.config.get, key)
+    if success then return value end
+end
+
+local function config_set(key, value)
+    if not millennium.config or not millennium.config.set then return false end
+    local success, ok = pcall(millennium.config.set, key, value)
+    return success and ok ~= false
+end
+
+local function settings()
+    return {
+        fastFetch = config_get("fastFetch") ~= false,
+        morrenusApiKey = tostring(config_get("morrenusApiKey") or DEFAULT_SETTINGS.morrenusApiKey),
+        theme = tostring(config_get("theme") or DEFAULT_SETTINGS.theme),
+        useSteamLanguage = config_get("useSteamLanguage") ~= false,
+    }
+end
+
+local function steam_path()
+    local success, path = pcall(millennium.steam_path)
+    if success and type(path) == "string" and path ~= "" then return path end
+    return nil
+end
+
+local function temp_root()
+    local root = m_utils.getenv("TEMP") or m_utils.getenv("TMP") or m_utils.getenv("LOCALAPPDATA")
+    if not root or root == "" then return nil end
+
+    local directory = fs.join(root, "LuaTools")
+    if not fs.exists(directory) then fs.create_directories(directory) end
+    return directory
+end
+
+local function work_directory(appid)
+    local root = temp_root()
+    if not root then return nil end
+
+    local directory = fs.join(root, tostring(appid))
+    if not fs.exists(directory) then fs.create_directories(directory) end
+    return directory
+end
+
+local function state_path(appid)
+    local directory = work_directory(appid)
+    if not directory then return nil end
+    return fs.join(directory, "state.json")
+end
+
+local function worker_state_path(appid)
+    local directory = work_directory(appid)
+    if not directory then return nil end
+    return fs.join(directory, "worker.json")
+end
+
+local function log_path(appid)
+    local directory = work_directory(appid)
+    if not directory then return nil end
+    return fs.join(directory, "download.log")
+end
+
+local function remove_work_directory(appid)
+    local directory = work_directory(appid)
+    if directory and fs.exists(directory) then pcall(fs.remove_all, directory) end
+end
+
+local function save_state(appid, state)
+    states[appid] = state
+    local path = state_path(appid)
+    if path then m_utils.write_file(path, encode(state)) end
+end
+
+local function load_state(appid)
+    local state = states[appid]
+    if state then return state end
+
+    local path = state_path(appid)
+    if not path or not fs.exists(path) then return nil end
+
+    local content = m_utils.read_file(path)
+    local success, decoded = pcall(cjson.decode, content or "")
+    if success and type(decoded) == "table" then
+        states[appid] = decoded
+        return decoded
+    end
+end
+
+local function asset_json(path)
+    local content = millennium.assets.read(path)
+    if not content then return nil end
+
+    local success, value = pcall(cjson.decode, content)
+    if success and type(value) == "table" then return value end
+end
+
+local function source_url(source, appid, values)
+    local url = source.url:gsub("<appid>", tostring(appid))
+    return url:gsub("<moapikey>", values.morrenusApiKey or "")
+end
+
+local function source_status(source, appid, values)
+    local needs_key = source.url:find("<moapikey>", 1, true) ~= nil and (values.morrenusApiKey or "") == ""
+
+    return {
+        name = source.name,
+        displayName = source.name,
+        available = not needs_key,
+        canDownload = not needs_key,
+        needsKey = needs_key,
+        locked = needs_key,
+        downloading = false,
+        url = source_url(source, appid, values),
+    }
+end
+
+local function public_state(state)
+    local sources = {}
+    for _, source in ipairs(state.sources or {}) do
+        local downloading = (state.status == "downloading" or state.status == "extracting" or state.status == "installing") and state.selectedSource == source.name
+        table.insert(sources, {
+            name = source.name,
+            displayName = source.displayName,
+            available = source.available,
+            canDownload = source.canDownload,
+            needsKey = source.needsKey,
+            locked = source.locked,
+            downloading = downloading,
+            indeterminate = downloading,
+            progress = downloading and 100 or 0,
+        })
+    end
+
+    local error = state.error
+    if state.status == "failed" and state.logPath and state.logPath ~= "" then
+        error = tostring(error or "Download failed") .. " — log: " .. tostring(state.logPath)
+    end
+
+    return {
+        checking = state.status == "checking",
+        sourcesLoaded = state.status ~= "checking",
+        sources = sources,
+        fastFetch = state.fastFetch == true,
+        installed = state.status == "installed",
+        installStatus = state.status == "installed" and "The game has been added successfully." or nil,
+        error = state.status == "failed" and error or nil,
+        logPath = state.logPath,
+    }
+end
+
+local function powershell_quote(value)
+    return "'" .. tostring(value):gsub("'", "''") .. "'"
+end
+
+local function start_download(appid, source)
+    local steam = steam_path()
+    local work = work_directory(appid)
+    if not steam or not work then return false, "Could not find Steam installation" end
+
+    local download_path = fs.join(work, tostring(appid) .. ".zip")
+    local extract_path = fs.join(work, "extract")
+    local state_file = worker_state_path(appid)
+    local script_path = fs.join(directory, tostring(appid) .. "-download.ps1")
+    local lua_path = fs.join(steam, "config", "stplug-in", tostring(appid) .. ".lua")
+    local depot_path = fs.join(steam, "depotcache")
+    local log_file = log_path(appid)
+
+    if not fs.exists(depot_path) then fs.create_directories(depot_path) end
+    if fs.exists(extract_path) then fs.remove_all(extract_path) end
+    if fs.exists(download_path) then fs.remove(download_path) end
+    fs.create_directories(extract_path)
+
+    if source.url:find('["\r\n\']') then return false, "Invalid download URL" end
+    m_utils.write_file(state_file, encode({ status = "downloading", logPath = log_file }))
+
+    local script = string.format([==[$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$logFile = %s
+function Write-State($status, $errorMessage = '') {
+    $payload = @{ status = $status; error = $errorMessage; logPath = $logFile } | ConvertTo-Json -Compress
+    Set-Content -LiteralPath %s -Value $payload -NoNewline
+}
+function Run-Native($name, $exe, [string[]]$arguments) {
+    Add-Content -LiteralPath $logFile -Value ('[' + (Get-Date -Format o) + '] ' + $name)
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $exe @arguments >> $logFile 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
+    if ($exitCode -ne 0) { throw ($name + ' failed with exit code ' + $exitCode) }
+}
+try {
+    Set-Content -LiteralPath $logFile -Value ('LuaTools download log for app %s from %s')
+    Write-State 'downloading'
+    Run-Native 'curl download' 'curl.exe' @('--fail', '--location', '--silent', '--show-error', '--output', %s, %s)
+    Write-State 'extracting'
+    Run-Native 'extract archive' 'tar.exe' @('-xf', %s, '-C', %s)
+    Write-State 'installing'
+    $lua = Get-ChildItem -LiteralPath %s -Recurse -Filter %s | Select-Object -First 1
+    if (-not $lua) { $lua = Get-ChildItem -LiteralPath %s -Recurse -Filter '*.lua' | Select-Object -First 1 }
+    if (-not $lua) { throw 'Lua script not found in downloaded archive' }
+    (Get-Content -LiteralPath $lua.FullName -Raw) -replace '(?m)^\s*setManifestid\(', '-- setManifestid(' | Set-Content -LiteralPath %s -NoNewline
+    Get-ChildItem -LiteralPath %s -Recurse -Filter '*.manifest' | Copy-Item -Destination %s -Force
+    Write-State 'installed'
+} catch {
+    Add-Content -LiteralPath $logFile -Value ('[' + (Get-Date -Format o) + '] ERROR: ' + $_.Exception.Message)
+    Add-Content -LiteralPath $logFile -Value $_.ScriptStackTrace
+    Write-State 'failed' $_.Exception.Message
+}
+]==], powershell_quote(log_file), powershell_quote(state_file), tostring(appid), source.name, powershell_quote(download_path), powershell_quote(source.url), powershell_quote(download_path), powershell_quote(extract_path), powershell_quote(extract_path), powershell_quote(tostring(appid) .. ".lua"), powershell_quote(extract_path), powershell_quote(lua_path), powershell_quote(extract_path), powershell_quote(depot_path))
+
+    m_utils.write_file(script_path, script)
+    m_utils.exec('start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' .. script_path .. '"')
+    return true
+end
 
 function HasLuaToolsForApp(appid)
-    return backend_request("GET", "/has/" .. tostring(appid))
+    local steam = steam_path()
+    if not steam then return error_response("Could not find Steam installation") end
+
+    local scripts = fs.join(steam, "config", "stplug-in")
+    local id = tostring(appid)
+    return encode({
+        success = true,
+        exists = fs.exists(fs.join(scripts, id .. ".lua")) or fs.exists(fs.join(scripts, id .. ".lua.disabled")),
+    })
 end
 
 function DeleteLuaToolsForApp(appid)
-    return backend_request("POST", "/remove/" .. tostring(appid))
+    local steam = steam_path()
+    if not steam then return error_response("Could not find Steam installation") end
+
+    local scripts = fs.join(steam, "config", "stplug-in")
+    local id = tostring(appid)
+    for _, extension in ipairs({ ".lua", ".lua.disabled" }) do
+        local path = fs.join(scripts, id .. extension)
+        if fs.exists(path) then fs.remove(path) end
+    end
+
+    return encode({ success = true })
 end
 
-function CheckApisForApp(appid)
-    return backend_request("POST", "/check-sources/" .. tostring(appid))
+local function source_list(appid)
+    local values = settings()
+    local sources = {}
+    for _, source in ipairs(SOURCES) do
+        table.insert(sources, source_status(source, appid, values))
+    end
+    return sources
 end
 
-function StartAddViaLuaToolsFromUrl(appid, source)
-    return backend_request("POST", "/download/" .. tostring(appid), { source = source })
-end
-
-function GetAddViaLuaToolsStatus(appid)
-    return backend_request("GET", "/download-status/" .. tostring(appid))
-end
-
-function CancelAddViaLuaTools(appid)
-    return backend_request("POST", "/cancel/" .. tostring(appid))
-end
-
-function RestartSteam()
-    return backend_request("POST", "/restart-steam")
+local function select_source(state)
+    for _, source in ipairs(state.sources or {}) do
+        if source.canDownload then return source end
+    end
 end
 
 function StartLuaToolsAdd(appid)
-    return backend_request("POST", "/add/" .. tostring(appid))
+    appid = tonumber(appid)
+    if not appid then return error_response("Invalid app id") end
+
+    local values = settings()
+    local state = {
+        status = "checking",
+        sources = source_list(appid),
+        fastFetch = values.fastFetch,
+        logPath = log_path(appid),
+    }
+    save_state(appid, state)
+
+    if values.fastFetch then
+        local source = select_source(state)
+        if source then
+            local started, message = start_download(appid, source)
+            if started then
+                state.status = "downloading"
+                state.selectedSource = source.name
+            else
+                state.status = "failed"
+                state.error = message
+            end
+        else
+            state.status = "failed"
+            state.error = "No downloadable sources are available"
+        end
+    else
+        state.status = "ready"
+    end
+
+    save_state(appid, state)
+    return encode({ success = true })
+end
+
+function PickLuaToolsAddSource(appid, source_name)
+    appid = tonumber(appid)
+    local state = appid and load_state(appid)
+    if not state then return error_response("No download is waiting for a source") end
+
+    local source
+    for _, candidate in ipairs(state.sources or {}) do
+        if candidate.name == source_name then source = candidate break end
+    end
+    if not source or not source.canDownload then return error_response("Selected source is unavailable") end
+
+    local started, message = start_download(appid, source)
+    if not started then
+        state.status = "failed"
+        state.error = message
+        save_state(appid, state)
+        return error_response(message)
+    end
+
+    state.status = "downloading"
+    state.selectedSource = source.name
+    state.logPath = log_path(appid)
+    save_state(appid, state)
+    return encode({ success = true })
 end
 
 function GetLuaToolsAddStatus(appid)
-    return backend_request("GET", "/add-status/" .. tostring(appid))
+    appid = tonumber(appid)
+    local state = appid and load_state(appid)
+    if not state then return encode({ success = true, sources = {} }) end
+
+    local path = worker_state_path(appid)
+    if path and fs.exists(path) then
+        local content = m_utils.read_file(path)
+        local success, update = pcall(cjson.decode, content or "")
+        if success and type(update) == "table" and update.status then
+            state.status = update.status
+            state.error = update.error
+            state.logPath = update.logPath or state.logPath
+            if update.status == "installed" then
+                states[appid] = state
+                remove_work_directory(appid)
+            else
+                save_state(appid, state)
+            end
+        end
+    end
+
+    return encode(public_state(state))
 end
 
-function PickLuaToolsAddSource(appid, source)
-    return backend_request("POST", "/add-source/" .. tostring(appid), { source = source })
+function GetAddViaLuaToolsStatus(appid)
+    return GetLuaToolsAddStatus(appid)
 end
 
-function OpenSettings()
-    return backend_request("POST", "/open/settings")
+function CancelAddViaLuaTools(appid)
+    appid = tonumber(appid)
+    if appid then
+        local state = load_state(appid)
+        if state then
+            state.status = "failed"
+            state.error = "Cancelled"
+            save_state(appid, state)
+        end
+    end
+    return encode({ success = true })
 end
 
-function OpenFix(appid)
-    return backend_request("POST", "/open/fix/" .. tostring(appid))
+function CheckApisForApp(appid)
+    appid = tonumber(appid)
+    if not appid then return error_response("Invalid app id") end
+
+    return encode({
+        success = true,
+        results = source_list(appid),
+    })
 end
 
--- "Games added since last Steam restart" popup: read the list, then dismiss it.
+function StartAddViaLuaToolsFromUrl(appid, _, source)
+    appid = tonumber(appid)
+    if not source and type(_) == "string" and _:match("^https?://") then source = _ end
+    if not appid or type(source) ~= "string" or not source:match("^https?://") then return error_response("Invalid download request") end
+
+    local state = {
+        status = "ready",
+        sources = {
+            {
+                name = "Direct download",
+                displayName = "Direct download",
+                available = true,
+                canDownload = true,
+                url = source,
+            },
+        },
+        logPath = log_path(appid),
+    }
+    save_state(appid, state)
+    return PickLuaToolsAddSource(appid, "Direct download")
+end
+
+function OpenExternalUrl(url)
+    if type(url) ~= "string" or not url:match("^https?://") or url:find('["\r\n]') then return error_response("Invalid URL") end
+    m_utils.exec('start "" "' .. url .. '"')
+    return encode({ success = true })
+end
+
+function GetThemes()
+    return encode({
+        success = true,
+        themes = asset_json("public/themes/themes.json") or {},
+    })
+end
+
+function GetIconDataUrl()
+    local icon = millennium.assets.read("public/luatools-icon.png")
+    if not icon then return error_response("LuaTools icon is unavailable") end
+
+    return encode({
+        success = true,
+        dataUrl = "data:image/png;base64," .. base64_encode(icon),
+    })
+end
+
+function GetSettingsConfig()
+    local values = settings()
+    return encode({
+        success = true,
+        schemaVersion = 1,
+        schema = {},
+        values = {
+            general = values,
+        },
+        language = "en",
+        locales = {},
+        translations = {},
+    })
+end
+
+function ApplySettingsChanges(first, second)
+    local changes_json = second or first
+    local success, changes = pcall(cjson.decode, tostring(changes_json or "{}"))
+    if not success or type(changes) ~= "table" then return error_response("Invalid settings payload") end
+
+    if changes.fastFetch ~= nil then config_set("fastFetch", changes.fastFetch == true) end
+    if changes.morrenusApiKey ~= nil then config_set("morrenusApiKey", tostring(changes.morrenusApiKey or "")) end
+    if changes.theme ~= nil then config_set("theme", tostring(changes.theme or "original")) end
+    if changes.useSteamLanguage ~= nil then config_set("useSteamLanguage", changes.useSteamLanguage == true) end
+
+    return encode({
+        success = true,
+        values = {
+            general = settings(),
+        },
+    })
+end
+
+function GetTranslations(_, language)
+    return encode({
+        success = true,
+        language = type(language) == "string" and language or "en",
+        locales = {},
+        strings = {},
+    })
+end
+
+function GetGamesDatabase()
+    return encode({
+        success = true,
+        database = {},
+    })
+end
+
+function CheckForFixes()
+    return encode({
+        success = true,
+        hasFix = false,
+        fixes = {},
+    })
+end
+
+function CheckForUpdatesNow()
+    return encode({ success = false, error = "Standalone updates are installed through Millennium." })
+end
+
 function ReadLoadedApps()
-    return backend_request("GET", "/loaded-apps")
+    return encode({ success = true, apps = {} })
 end
 
 function DismissLoadedApps()
-    return backend_request("POST", "/loaded-apps")
+    return encode({ success = true })
 end
-
--- ── Webkit file management (lifted verbatim from the old backend) ─────────────
-
-local function copy_webkit_files()
-    local steam_dir = steam_utils.detect_steam_install_path()
-    if not steam_dir or steam_dir == "" then return end
-
-    local target_webkit_dir = fs.join(steam_dir, "steamui", "webkit")
-    if not fs.exists(target_webkit_dir) then
-        fs.create_directories(target_webkit_dir)
-    end
-
-    local public_dir = fs.join(paths.get_plugin_dir(), "public")
-
-    local src_js = fs.join(public_dir, "luatools.js")
-    local dst_js = fs.join(target_webkit_dir, "luatools.js")
-    if fs.exists(src_js) then
-        local content = m_utils.read_file(src_js)
-        if content then m_utils.write_file(dst_js, content) end
-    end
-
-    local src_css = fs.join(public_dir, "steamdb-webkit.css")
-    local dst_css = fs.join(target_webkit_dir, "steamdb-webkit.css")
-    if fs.exists(src_css) then
-        local content = m_utils.read_file(src_css)
-        if content then m_utils.write_file(dst_css, content) end
-    end
-end
-
-local function inject_webkit_files()
-    millennium.add_browser_css("webkit/steamdb-webkit.css")
-    millennium.add_browser_js("webkit/luatools.js")
-end
-
--- ── Lifecycle ────────────────────────────────────────────────────────────────
 
 local function on_load()
-    logger.log("LuaTools injector stub loading (millennium " .. tostring(millennium.version()) .. ")")
-    ensure_backend_running()
-    copy_webkit_files()
-    inject_webkit_files()
     millennium.ready()
 end
 
-local function on_unload()
-    logger.log("LuaTools injector stub unloading")
-end
-
-local function on_frontend_loaded()
-    -- Re-copy so an updated luatools.js is picked up without a manual step.
-    copy_webkit_files()
-end
-
 return {
-    on_load            = on_load,
-    on_unload          = on_unload,
-    on_frontend_loaded = on_frontend_loaded,
+    on_load = on_load,
 }

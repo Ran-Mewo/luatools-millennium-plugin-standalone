@@ -1,0 +1,23 @@
+[plugin]
+id = "luatools"
+name = "LuaTools"
+version = "9.1.0"
+author = "LuaTools"
+description = "LuaTools Steam Plugin"
+
+[assets]
+resources = ["public/luatools-icon.png", "public/themes/themes.json"]
+
+[backend]
+entry = "backend/main.lua"
+sources = ["backend/main.lua"]
+
+[webkit]
+entry = "webview/preload.ts"
+
+[compiler]
+output_path = "auto"
+
+[dev]
+auto_restart = true
+reload_steamui_when = "both"
