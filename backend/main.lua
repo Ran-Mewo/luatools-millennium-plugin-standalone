@@ -2,6 +2,7 @@ local millennium = require("millennium")
 local fs = require("fs")
 local m_utils = require("utils")
 local cjson = require("json")
+local logger = require("logger")
 
 local SOURCES = {
     {
@@ -63,26 +64,7 @@ local function base64_encode(data)
     end) .. ({ "", "==", "=" })[#data % 3 + 1])
 end
 
-local function config_get(key)
-    if not millennium.config or not millennium.config.get then return nil end
-    local success, value = pcall(millennium.config.get, key)
-    if success then return value end
-end
-
-local function config_set(key, value)
-    if not millennium.config or not millennium.config.set then return false end
-    local success, ok = pcall(millennium.config.set, key, value)
-    return success and ok ~= false
-end
-
-local function settings()
-    return {
-        fastFetch = config_get("fastFetch") ~= false,
-        morrenusApiKey = tostring(config_get("morrenusApiKey") or DEFAULT_SETTINGS.morrenusApiKey),
-        theme = tostring(config_get("theme") or DEFAULT_SETTINGS.theme),
-        useSteamLanguage = config_get("useSteamLanguage") ~= false,
-    }
-end
+local saved_settings = nil
 
 local function steam_path()
     local success, path = pcall(millennium.steam_path)
@@ -97,6 +79,44 @@ local function temp_root()
     local directory = fs.join(root, "LuaTools")
     if not fs.exists(directory) then fs.create_directories(directory) end
     return directory
+end
+
+local function settings_path()
+    local path = steam_path()
+    if not path then return nil end
+    return fs.join(path, "millennium", "plugins", "luatools-settings.json")
+end
+
+local function settings()
+    if saved_settings then return saved_settings end
+
+    local values = {
+        fastFetch = DEFAULT_SETTINGS.fastFetch,
+        morrenusApiKey = DEFAULT_SETTINGS.morrenusApiKey,
+        theme = DEFAULT_SETTINGS.theme,
+        useSteamLanguage = DEFAULT_SETTINGS.useSteamLanguage,
+    }
+
+    local path = settings_path()
+    if path and fs.exists(path) then
+        local content = m_utils.read_file(path)
+        local success, decoded = pcall(cjson.decode, content or "")
+        if success and type(decoded) == "table" then
+            if decoded.fastFetch ~= nil then values.fastFetch = decoded.fastFetch == true end
+            if decoded.morrenusApiKey ~= nil then values.morrenusApiKey = tostring(decoded.morrenusApiKey or "") end
+            if decoded.theme ~= nil then values.theme = tostring(decoded.theme or "original") end
+            if decoded.useSteamLanguage ~= nil then values.useSteamLanguage = decoded.useSteamLanguage == true end
+        end
+    end
+
+    saved_settings = values
+    return values
+end
+
+local function save_settings(values)
+    saved_settings = values
+    local path = settings_path()
+    if path then m_utils.write_file(path, encode(values)) end
 end
 
 local function work_directory(appid)
@@ -157,7 +177,8 @@ local function asset_json(path)
     if not content then return nil end
 
     local success, value = pcall(cjson.decode, content)
-    if success and type(value) == "table" then return value end
+    if success then return value end
+    logger:error("Failed to decode bundled asset " .. path)
 end
 
 local function source_url(source, appid, values)
@@ -226,7 +247,7 @@ local function start_download(appid, source)
     local download_path = fs.join(work, tostring(appid) .. ".zip")
     local extract_path = fs.join(work, "extract")
     local state_file = worker_state_path(appid)
-    local script_path = fs.join(directory, tostring(appid) .. "-download.ps1")
+    local script_path = fs.join(work, "download.ps1")
     local lua_path = fs.join(steam, "config", "stplug-in", tostring(appid) .. ".lua")
     local depot_path = fs.join(steam, "depotcache")
     local log_file = log_path(appid)
@@ -236,7 +257,10 @@ local function start_download(appid, source)
     if fs.exists(download_path) then fs.remove(download_path) end
     fs.create_directories(extract_path)
 
-    if source.url:find('["\r\n\']') then return false, "Invalid download URL" end
+    if source.url:find('["\r\n\']') then
+        logger:error("Rejected unsafe download URL for " .. tostring(appid) .. " from " .. tostring(source.name))
+        return false, "Invalid download URL"
+    end
     m_utils.write_file(state_file, encode({ status = "downloading", logPath = log_file }))
 
     local script = string.format([==[$ErrorActionPreference = 'Stop'
@@ -403,6 +427,7 @@ function GetLuaToolsAddStatus(appid)
                 states[appid] = state
                 remove_work_directory(appid)
             else
+                if update.status == "failed" then logger:error("LuaTools install failed for " .. tostring(appid) .. ": " .. tostring(update.error or "unknown error")) end
                 save_state(appid, state)
             end
         end
@@ -503,15 +528,16 @@ function ApplySettingsChanges(first, second)
     local success, changes = pcall(cjson.decode, tostring(changes_json or "{}"))
     if not success or type(changes) ~= "table" then return error_response("Invalid settings payload") end
 
-    if changes.fastFetch ~= nil then config_set("fastFetch", changes.fastFetch == true) end
-    if changes.morrenusApiKey ~= nil then config_set("morrenusApiKey", tostring(changes.morrenusApiKey or "")) end
-    if changes.theme ~= nil then config_set("theme", tostring(changes.theme or "original")) end
-    if changes.useSteamLanguage ~= nil then config_set("useSteamLanguage", changes.useSteamLanguage == true) end
+    if changes.fastFetch ~= nil then values.fastFetch = changes.fastFetch == true end
+    if changes.morrenusApiKey ~= nil then values.morrenusApiKey = tostring(changes.morrenusApiKey or "") end
+    if changes.theme ~= nil then values.theme = tostring(changes.theme or "original") end
+    if changes.useSteamLanguage ~= nil then values.useSteamLanguage = changes.useSteamLanguage == true end
+    save_settings(values)
 
     return encode({
         success = true,
         values = {
-            general = settings(),
+            general = values,
         },
     })
 end
