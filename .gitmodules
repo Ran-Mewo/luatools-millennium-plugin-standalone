@@ -1,0 +1,3 @@
+[submodule "install-scripts"]
+	path = install-scripts
+	url = https://github.com/Ran-Mewo/scripts.git
