@@ -220,7 +220,7 @@ local function public_state(state)
 
     local error = state.error
     if state.status == "failed" and state.logPath and state.logPath ~= "" then
-        error = tostring(error or "Download failed") .. " — log: " .. tostring(state.logPath)
+        error = tostring(error or "Download failed") .. " - log: " ..tostring(state.logPath)
     end
 
     return {
@@ -283,9 +283,9 @@ function Run-Native($name, $exe, [string[]]$arguments) {
     if ($exitCode -ne 0) { throw ($name + ' failed with exit code ' + $exitCode) }
 }
 try {
-    Set-Content -LiteralPath $logFile -Value ('LuaTools download log for app %s from %s')
+    Add-Content -LiteralPath $logFile -Value ('LuaTools download log for app %s from %s')
     Write-State 'downloading'
-    Run-Native 'curl download' 'curl.exe' @('--fail', '--location', '--silent', '--show-error', '--output', %s, %s)
+    Run-Native 'curl download' 'curl.exe' @('--fail', '--location', '--silent', '--show-error', '--user-agent', 'discord(dot)gg/luatools', '--output', %s, %s)
     Write-State 'extracting'
     Run-Native 'extract archive' 'tar.exe' @('-xf', %s, '-C', %s)
     Write-State 'installing'
@@ -342,9 +342,11 @@ local function source_list(appid)
     return sources
 end
 
-local function select_source(state)
+local function select_source(state, after_name)
+    local passed = after_name == nil
     for _, source in ipairs(state.sources or {}) do
-        if source.canDownload then return source end
+        if passed and source.canDownload then return source end
+        if source.name == after_name then passed = true end
     end
 end
 
@@ -427,7 +429,15 @@ function GetLuaToolsAddStatus(appid)
                 states[appid] = state
                 remove_work_directory(appid)
             else
-                if update.status == "failed" then logger:error("LuaTools install failed for " .. tostring(appid) .. ": " .. tostring(update.error or "unknown error")) end
+                if update.status == "failed" then
+                    logger:error("LuaTools install failed for " .. tostring(appid) .. " from " .. tostring(state.selectedSource) .. ": " .. tostring(update.error or "unknown error"))
+                    local next_source = state.fastFetch and not state.cancelled and select_source(state, state.selectedSource)
+                    if next_source and start_download(appid, next_source) then
+                        state.status = "downloading"
+                        state.error = nil
+                        state.selectedSource = next_source.name
+                    end
+                end
                 save_state(appid, state)
             end
         end
@@ -447,6 +457,7 @@ function CancelAddViaLuaTools(appid)
         if state then
             state.status = "failed"
             state.error = "Cancelled"
+            state.cancelled = true
             save_state(appid, state)
         end
     end
