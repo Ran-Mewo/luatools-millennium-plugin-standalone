@@ -6,11 +6,11 @@ author = "LuaTools"
 description = "LuaTools Steam Plugin"
 
 [assets]
-resources = ["public/luatools-icon.png", "public/themes/themes.json"]
+resources = ["public/luatools-icon.png", "public/themes/themes.json", "backend/auth.ps1"]
 
 [backend]
 entry = "backend/main.lua"
-sources = ["backend/main.lua"]
+sources = ["backend/main.lua", "backend/auth.lua"]
 
 [webkit]
 entry = "webview/preload.ts"

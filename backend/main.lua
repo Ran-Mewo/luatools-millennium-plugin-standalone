@@ -3,11 +3,17 @@ local fs = require("fs")
 local m_utils = require("utils")
 local cjson = require("json")
 local logger = require("logger")
+local auth = require("auth")
 
 local SOURCES = {
     {
         name = "Morrenus",
         url = "https://hubcapmanifest.com/api/v1/manifest/<appid>?api_key=<moapikey>",
+    },
+    {
+        name = "Luie",
+        url = "https://lua.tools/api/manifest/download?appid=<appid>&source=Luie",
+        needsLogin = true,
     },
     {
         name = "Ryuu",
@@ -188,14 +194,16 @@ end
 
 local function source_status(source, appid, values)
     local needs_key = source.url:find("<moapikey>", 1, true) ~= nil and (values.morrenusApiKey or "") == ""
+    local needs_login = source.needsLogin == true and auth.status().status ~= "signed_in"
 
     return {
         name = source.name,
         displayName = source.name,
-        available = not needs_key,
-        canDownload = not needs_key,
+        available = not needs_key and not needs_login,
+        canDownload = not needs_key and not needs_login,
         needsKey = needs_key,
-        locked = needs_key,
+        needsLogin = source.needsLogin == true,
+        locked = needs_key or needs_login,
         downloading = false,
         url = source_url(source, appid, values),
     }
@@ -211,6 +219,7 @@ local function public_state(state)
             available = source.available,
             canDownload = source.canDownload,
             needsKey = source.needsKey,
+            needsLogin = source.needsLogin,
             locked = source.locked,
             downloading = downloading,
             indeterminate = downloading,
@@ -261,6 +270,14 @@ local function start_download(appid, source)
         logger:error("Rejected unsafe download URL for " .. tostring(appid) .. " from " .. tostring(source.name))
         return false, "Invalid download URL"
     end
+    local download_command
+    if source.needsLogin then
+        local auth_script, message = auth.worker_path()
+        if not auth_script then return false, message end
+        download_command = ". " .. powershell_quote(auth_script) .. "\n    Invoke-LuaToolsDownload " .. powershell_quote(source.url) .. " " .. powershell_quote(download_path)
+    else
+        download_command = "Run-Native 'curl download' 'curl.exe' @('--fail', '--location', '--silent', '--show-error', '--user-agent', 'discord(dot)gg/luatools', '--output', " .. powershell_quote(download_path) .. ", " .. powershell_quote(source.url) .. ")"
+    end
     m_utils.write_file(state_file, encode({ status = "downloading", logPath = log_file }))
 
     local script = string.format([==[$ErrorActionPreference = 'Stop'
@@ -285,25 +302,42 @@ function Run-Native($name, $exe, [string[]]$arguments) {
 try {
     Add-Content -LiteralPath $logFile -Value ('LuaTools download log for app %s from %s')
     Write-State 'downloading'
-    Run-Native 'curl download' 'curl.exe' @('--fail', '--location', '--silent', '--show-error', '--user-agent', 'discord(dot)gg/luatools', '--output', %s, %s)
-    Write-State 'extracting'
-    Run-Native 'extract archive' 'tar.exe' @('-xf', %s, '-C', %s)
+    %s
+    $downloadPath = %s
+    $extractPath = %s
+    $stream = [IO.File]::OpenRead($downloadPath)
+    try {
+        $header = New-Object byte[] 4
+        $count = $stream.Read($header, 0, 4)
+    } finally { $stream.Dispose() }
+    $isZip = $count -eq 4 -and $header[0] -eq 80 -and $header[1] -eq 75 -and (($header[2] -eq 3 -and $header[3] -eq 4) -or ($header[2] -eq 5 -and $header[3] -eq 6) -or ($header[2] -eq 7 -and $header[3] -eq 8))
+    if ($isZip) {
+        Write-State 'extracting'
+        Run-Native 'extract archive' 'tar.exe' @('-xf', $downloadPath, '-C', $extractPath)
+        $lua = Get-ChildItem -LiteralPath $extractPath -Recurse -Filter %s | Select-Object -First 1
+        if (-not $lua) { $lua = Get-ChildItem -LiteralPath $extractPath -Recurse -Filter '*.lua' | Select-Object -First 1 }
+        if (-not $lua) { throw 'Lua script not found in downloaded archive' }
+        $content = Get-Content -LiteralPath $lua.FullName -Raw
+    } else {
+        $content = Get-Content -LiteralPath $downloadPath -Raw
+        if ($content -notmatch '(?m)^\s*addappid\s*\(\s*\d+') { throw 'Download did not contain a ZIP archive or a Lua script' }
+    }
     Write-State 'installing'
-    $lua = Get-ChildItem -LiteralPath %s -Recurse -Filter %s | Select-Object -First 1
-    if (-not $lua) { $lua = Get-ChildItem -LiteralPath %s -Recurse -Filter '*.lua' | Select-Object -First 1 }
-    if (-not $lua) { throw 'Lua script not found in downloaded archive' }
-    (Get-Content -LiteralPath $lua.FullName -Raw) -replace '(?m)^\s*setManifestid\(', '-- setManifestid(' | Set-Content -LiteralPath %s -NoNewline
-    Get-ChildItem -LiteralPath %s -Recurse -Filter '*.manifest' | Copy-Item -Destination %s -Force
+    $luaPath = %s
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $luaPath) -Force
+    [IO.File]::WriteAllText($luaPath, ($content -replace '(?m)^\s*setManifestid\(', '-- setManifestid('), (New-Object Text.UTF8Encoding($false)))
+    Get-ChildItem -LiteralPath $extractPath -Recurse -Filter '*.manifest' | Copy-Item -Destination %s -Force
     Write-State 'installed'
 } catch {
     Add-Content -LiteralPath $logFile -Value ('[' + (Get-Date -Format o) + '] ERROR: ' + $_.Exception.Message)
     Add-Content -LiteralPath $logFile -Value $_.ScriptStackTrace
     Write-State 'failed' $_.Exception.Message
 }
-]==], powershell_quote(log_file), powershell_quote(state_file), tostring(appid), source.name, powershell_quote(download_path), powershell_quote(source.url), powershell_quote(download_path), powershell_quote(extract_path), powershell_quote(extract_path), powershell_quote(tostring(appid) .. ".lua"), powershell_quote(extract_path), powershell_quote(lua_path), powershell_quote(extract_path), powershell_quote(depot_path))
+]==], powershell_quote(log_file), powershell_quote(state_file), tostring(appid), source.name, download_command, powershell_quote(download_path), powershell_quote(extract_path), powershell_quote(tostring(appid) .. ".lua"), powershell_quote(lua_path), powershell_quote(depot_path))
 
     m_utils.write_file(script_path, script)
-    m_utils.exec('start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' .. script_path .. '"')
+    local _, status = m_utils.exec('start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' .. script_path .. '" <NUL >NUL 2>&1')
+    if status ~= 0 then return false, "Could not start download worker" end
     return true
 end
 
@@ -342,7 +376,19 @@ local function source_list(appid)
     return sources
 end
 
+local function refresh_source_login(state)
+    local signed_in = auth.status().status == "signed_in"
+    for _, source in ipairs(state.sources or {}) do
+        if source.needsLogin then
+            source.locked = not signed_in
+            source.available = signed_in
+            source.canDownload = signed_in
+        end
+    end
+end
+
 local function select_source(state, after_name)
+    refresh_source_login(state)
     local passed = after_name == nil
     for _, source in ipairs(state.sources or {}) do
         if passed and source.canDownload then return source end
@@ -390,6 +436,7 @@ function PickLuaToolsAddSource(appid, source_name)
     appid = tonumber(appid)
     local state = appid and load_state(appid)
     if not state then return error_response("No download is waiting for a source") end
+    refresh_source_login(state)
 
     local source
     for _, candidate in ipairs(state.sources or {}) do
@@ -443,6 +490,7 @@ function GetLuaToolsAddStatus(appid)
         end
     end
 
+    refresh_source_login(state)
     return encode(public_state(state))
 end
 
@@ -539,6 +587,7 @@ function ApplySettingsChanges(first, second)
     local success, changes = pcall(cjson.decode, tostring(changes_json or "{}"))
     if not success or type(changes) ~= "table" then return error_response("Invalid settings payload") end
 
+    local values = settings()
     if changes.fastFetch ~= nil then values.fastFetch = changes.fastFetch == true end
     if changes.morrenusApiKey ~= nil then values.morrenusApiKey = tostring(changes.morrenusApiKey or "") end
     if changes.theme ~= nil then values.theme = tostring(changes.theme or "original") end
@@ -589,7 +638,23 @@ function DismissLoadedApps()
     return encode({ success = true })
 end
 
+function GetLuaToolsAuthStatus()
+    return encode(auth.status())
+end
+
+function SignInLuaTools()
+    local success, message = auth.start("SignIn")
+    return encode({ success = success, error = message })
+end
+
+function SignOutLuaTools()
+    local success, message = auth.start("SignOut")
+    return encode({ success = success, error = message })
+end
+
 local function on_load()
+    local success, message = auth.start("Initialize")
+    if not success then logger:error(message) end
     millennium.ready()
 end
 

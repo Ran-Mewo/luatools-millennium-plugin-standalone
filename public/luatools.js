@@ -720,6 +720,10 @@
           badge = lt("Downloading…");
           icon = "fa-solid fa-spinner";
           statusColor = colors.accent;
+        } else if (s.needsLogin && s.locked) {
+          badge = "Sign in to LuaTools";
+          icon = "fa-solid fa-lock";
+          statusColor = "#ffc107";
         } else if (s.needsKey && s.locked) {
           badge = lt("Needs key");
           icon = "fa-solid fa-lock";
@@ -747,7 +751,17 @@
         right.appendChild(statusText);
         item.appendChild(left);
         item.appendChild(right);
-        if (clickable && s.canDownload && !s.downloading) {
+        if (s.needsLogin && s.locked) {
+          item.style.cursor = "pointer";
+          item.onclick = function () {
+            Millennium.callServerMethod("luatools", "SignInLuaTools", {}).then(function (res) {
+              const payload = typeof res === "string" ? JSON.parse(res) : res;
+              if (!payload.success) throw new Error(payload.error || "Could not start sign-in.");
+            }).catch(function (err) {
+              ShowLuaToolsAlert("LuaTools", err.message || "Could not start sign-in.");
+            });
+          };
+        } else if (clickable && s.canDownload && !s.downloading) {
           item.style.cursor = "pointer";
           item.onmouseover = function () {
             item.style.borderColor = colors.accent;
@@ -1428,6 +1442,54 @@
       return el;
     }
 
+    const accountRow = document.createElement("div");
+    accountRow.style.cssText = "display:flex;flex-direction:column;gap:8px;";
+    const accountStatus = document.createElement("span");
+    accountStatus.style.cssText = `font-size:13px;color:${colors.textSecondary};`;
+    accountStatus.textContent = "Checking LuaTools login…";
+    const accountButton = document.createElement("button");
+    accountButton.className = "luatools-btn";
+    accountButton.textContent = "Sign in to LuaTools";
+    accountButton.disabled = true;
+    let signedIn = false;
+    let accountActionPending = false;
+
+    function refreshAccount() {
+      if (!overlay.isConnected) return;
+      const request = accountActionPending ? Promise.resolve() : Millennium.callServerMethod("luatools", "GetLuaToolsAuthStatus", {}).then(function (res) {
+        if (accountActionPending || !overlay.isConnected) return;
+        const status = typeof res === "string" ? JSON.parse(res) : res;
+        signedIn = status.status === "signed_in";
+        const waiting = status.status === "waiting" || status.status === "checking";
+        accountStatus.textContent = signedIn ? "Signed in as " + (status.displayName || "LuaTools user") : status.error || (waiting ? "Complete sign-in in your browser." : "Sign in to download from Luie.");
+        accountButton.textContent = signedIn ? "Sign out" : waiting ? "Waiting for sign-in…" : "Sign in to LuaTools";
+        accountButton.disabled = waiting;
+      }).catch(function () {
+        accountStatus.textContent = "Could not check LuaTools login.";
+        accountButton.disabled = false;
+      });
+      request.finally(function () {
+        if (overlay.isConnected) setTimeout(refreshAccount, 1500);
+      });
+    }
+
+    accountButton.onclick = function () {
+      accountActionPending = true;
+      accountButton.disabled = true;
+      Millennium.callServerMethod("luatools", signedIn ? "SignOutLuaTools" : "SignInLuaTools", {}).then(function (res) {
+        const payload = typeof res === "string" ? JSON.parse(res) : res;
+        if (!payload.success) throw new Error(payload.error || "Could not update LuaTools login.");
+        accountStatus.textContent = signedIn ? "Signing out…" : "Opening sign-in in your browser…";
+      }).catch(function (err) {
+        ShowLuaToolsAlert("LuaTools", err.message || "Could not update LuaTools login.");
+      }).finally(function () {
+        accountActionPending = false;
+      });
+    };
+    accountRow.appendChild(label("LuaTools account"));
+    accountRow.appendChild(accountStatus);
+    accountRow.appendChild(accountButton);
+
     const themeRow = document.createElement("label");
     themeRow.style.cssText = "display:flex;flex-direction:column;gap:8px;font-size:14px;";
     const themeSelect = document.createElement("select");
@@ -1503,6 +1565,7 @@
       });
     };
 
+    body.appendChild(accountRow);
     body.appendChild(themeRow);
     body.appendChild(fastFetchRow);
     body.appendChild(keyRow);
@@ -1511,6 +1574,7 @@
     modal.appendChild(body);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
+    refreshAccount();
   }
 
   function showSettingsPopup() {
