@@ -385,6 +385,14 @@ local function refresh_source_login(state)
     end
 end
 
+local function sign_in_error(state)
+    for _, source in ipairs(state.sources or {}) do
+        if source.needsLogin and source.locked then
+            return "Sign in to LuaTools in your browser to download from " .. source.name .. ", then try again."
+        end
+    end
+end
+
 local function select_source(state, after_name)
     refresh_source_login(state)
     local passed = after_name == nil
@@ -397,6 +405,11 @@ end
 function StartLuaToolsAdd(appid)
     appid = tonumber(appid)
     if not appid then return error_response("Invalid app id") end
+
+    if auth.status().status ~= "signed_in" then
+        local started, message = auth.start("SignIn")
+        if not started then logger:error(message) end
+    end
 
     local values = settings()
     local state = {
@@ -420,7 +433,7 @@ function StartLuaToolsAdd(appid)
             end
         else
             state.status = "failed"
-            state.error = "No downloadable sources are available"
+            state.error = sign_in_error(state) or "No downloadable sources are available"
         end
     else
         state.status = "ready"
@@ -481,6 +494,8 @@ function GetLuaToolsAddStatus(appid)
                         state.status = "downloading"
                         state.error = nil
                         state.selectedSource = next_source.name
+                    elseif state.fastFetch and not state.cancelled then
+                        state.error = sign_in_error(state) or state.error
                     end
                 end
                 save_state(appid, state)

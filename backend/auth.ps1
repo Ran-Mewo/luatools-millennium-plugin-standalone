@@ -23,6 +23,11 @@ function Write-AuthStatus($status, $displayName = '', $errorMessage = '') {
     Move-Item -LiteralPath $temporary -Destination $authStatusFile -Force
 }
 
+function Read-AuthStatus {
+    try { return ([IO.File]::ReadAllText($authStatusFile) | ConvertFrom-Json).status }
+    catch { return $null }
+}
+
 function Read-AuthSession {
     if (-not [IO.File]::Exists($authFile)) { return $null }
     try {
@@ -137,6 +142,14 @@ function Start-BrowserSignIn {
             $remaining = [int][Math]::Max(0, ($deadline - [DateTime]::UtcNow).TotalMilliseconds)
             if (-not $pending.Wait($remaining)) { throw 'Sign-in timed out. Please try again.' }
             $context = $pending.GetAwaiter().GetResult()
+            if ($context.Request.IsLocal -and $context.Request.HttpMethod -eq 'GET' -and $context.Request.Url.AbsolutePath -eq '/login') {
+                $deadline = [DateTime]::UtcNow.AddMinutes(5)
+                Write-AuthStatus 'waiting'
+                $context.Response.Redirect($url)
+                $context.Response.Close()
+                $context = $null
+                continue
+            }
             if (-not $context.Request.IsLocal -or $context.Request.HttpMethod -ne 'GET' -or $context.Request.Url.AbsolutePath -ne '/callback') {
                 $context.Response.StatusCode = 404
                 $context.Response.Close()
@@ -215,7 +228,11 @@ if ($MyInvocation.InvocationName -ne '.') {
     $locked = $false
     try {
         $locked = Enter-AuthMutex $mutex 0
-        if (-not $locked) { return }
+        if (-not $locked) {
+            # Every tab opened through /login shares the running worker's verifier, so finishing in any of them signs in.
+            if ($Action -eq 'SignIn' -and (Read-AuthStatus) -eq 'waiting') { Start-Process 'http://localhost:53789/login' }
+            return
+        }
         if ($Action -eq 'SignOut') {
             Remove-Item -LiteralPath $authFile -Force -ErrorAction SilentlyContinue
             Write-AuthStatus 'signed_out'

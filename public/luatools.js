@@ -1462,8 +1462,8 @@
         signedIn = status.status === "signed_in";
         const waiting = status.status === "waiting" || status.status === "checking";
         accountStatus.textContent = signedIn ? "Signed in as " + (status.displayName || "LuaTools user") : status.error || (waiting ? "Complete sign-in in your browser." : "Sign in to download from Luie.");
-        accountButton.textContent = signedIn ? "Sign out" : waiting ? "Waiting for sign-in…" : "Sign in to LuaTools";
-        accountButton.disabled = waiting;
+        accountButton.textContent = signedIn ? "Sign out" : status.status === "waiting" ? "Open sign-in again" : waiting ? "Waiting for sign-in…" : "Sign in to LuaTools";
+        accountButton.disabled = status.status === "checking";
       }).catch(function () {
         accountStatus.textContent = "Could not check LuaTools login.";
         accountButton.disabled = false;
