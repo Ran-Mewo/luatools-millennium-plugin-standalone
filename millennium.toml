@@ -10,7 +10,7 @@ resources = ["public/luatools-icon.png", "public/themes/themes.json", "backend/a
 
 [backend]
 entry = "backend/main.lua"
-sources = ["backend/main.lua", "backend/auth.lua"]
+sources = ["backend/main.lua", "backend/auth.lua", "backend/powershell.lua"]
 
 [webkit]
 entry = "webview/preload.ts"

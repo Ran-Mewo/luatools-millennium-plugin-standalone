@@ -2,6 +2,7 @@ local millennium = require("millennium")
 local fs = require("fs")
 local utils = require("utils")
 local json = require("json")
+local powershell = require("powershell")
 
 local auth = {}
 local script_path
@@ -46,8 +47,7 @@ function auth.start(action)
     local path, message = auth.worker_path()
     if not path then return false, message end
     if action ~= "Initialize" and action ~= "SignIn" and action ~= "SignOut" then return false, "Invalid login action" end
-    local _, status = utils.exec('start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' .. path .. '" -Action ' .. action .. ' <NUL >NUL 2>&1')
-    if status ~= 0 then return false, "Could not start LuaTools login worker" end
+    if not powershell.start_hidden(path, "-Action " .. action) then return false, "Could not start LuaTools login worker" end
     return true
 end
 

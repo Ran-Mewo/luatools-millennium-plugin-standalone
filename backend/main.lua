@@ -4,6 +4,7 @@ local m_utils = require("utils")
 local cjson = require("json")
 local logger = require("logger")
 local auth = require("auth")
+local powershell = require("powershell")
 
 local SOURCES = {
     {
@@ -244,9 +245,7 @@ local function public_state(state)
     }
 end
 
-local function powershell_quote(value)
-    return "'" .. tostring(value):gsub("'", "''") .. "'"
-end
+local powershell_quote = powershell.quote
 
 local function start_download(appid, source)
     local steam = steam_path()
@@ -336,8 +335,7 @@ try {
 ]==], powershell_quote(log_file), powershell_quote(state_file), tostring(appid), source.name, download_command, powershell_quote(download_path), powershell_quote(extract_path), powershell_quote(tostring(appid) .. ".lua"), powershell_quote(lua_path), powershell_quote(depot_path))
 
     m_utils.write_file(script_path, script)
-    local _, status = m_utils.exec('start "" /b powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' .. script_path .. '" <NUL >NUL 2>&1')
-    if status ~= 0 then return false, "Could not start download worker" end
+    if not powershell.start_hidden(script_path) then return false, "Could not start download worker" end
     return true
 end
 
