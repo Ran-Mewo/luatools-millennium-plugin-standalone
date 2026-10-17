@@ -20,3 +20,5 @@ When the plugin loads without a saved session, it opens Discord sign-in in your 
 Login uses a local callback at `http://localhost:53789/callback`. Close any other LuaTools login flow if that port is already in use. Saved tokens are encrypted for your Windows account with DPAPI under `%LOCALAPPDATA%\LuaToolsPlugin\auth.dat` and refreshed automatically. Signing out removes the local session; the next plugin load opens sign-in again.
 
 Luie downloads use your LuaTools account's download allowance.
+
+If your network's DNS blocks a download or login server, the plugin looks the address up through Cloudflare (`1.1.1.1`) and retries. This covers the plugin's own requests only: the Discord sign-in page still opens in your browser and needs `db.lua.tools` to be reachable from it.

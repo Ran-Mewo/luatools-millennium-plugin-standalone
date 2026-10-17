@@ -269,18 +269,21 @@ local function start_download(appid, source)
         logger:error("Rejected unsafe download URL for " .. tostring(appid) .. " from " .. tostring(source.name))
         return false, "Invalid download URL"
     end
+    local network_script, network_message = powershell.worker_script("network.ps1")
+    if not network_script then return false, network_message end
     local download_command
     if source.needsLogin then
         local auth_script, message = auth.worker_path()
         if not auth_script then return false, message end
         download_command = ". " .. powershell_quote(auth_script) .. "\n    Invoke-LuaToolsDownload " .. powershell_quote(source.url) .. " " .. powershell_quote(download_path)
     else
-        download_command = "Run-Native 'curl download' 'curl.exe' @('--fail', '--location', '--silent', '--show-error', '--user-agent', 'discord(dot)gg/luatools', '--output', " .. powershell_quote(download_path) .. ", " .. powershell_quote(source.url) .. ")"
+        download_command = "Invoke-Download " .. powershell_quote(source.url) .. " " .. powershell_quote(download_path)
     end
     m_utils.write_file(state_file, encode({ status = "downloading", logPath = log_file }))
 
     local script = string.format([==[$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. %s
 $logFile = %s
 function Write-State($status, $errorMessage = '') {
     $payload = @{ status = $status; error = $errorMessage; logPath = $logFile } | ConvertTo-Json -Compress
@@ -297,6 +300,12 @@ function Run-Native($name, $exe, [string[]]$arguments) {
         $ErrorActionPreference = $oldErrorActionPreference
     }
     if ($exitCode -ne 0) { throw ($name + ' failed with exit code ' + $exitCode) }
+}
+function Invoke-Download($url, $destination) {
+    Add-Content -LiteralPath $logFile -Value ('[' + (Get-Date -Format o) + '] curl download')
+    $result = Invoke-Curl $url @('--fail', '--location', '--silent', '--show-error', '--user-agent', 'discord(dot)gg/luatools', '--output', $destination)
+    if ($result.Output) { Add-Content -LiteralPath $logFile -Value $result.Output }
+    if ($result.ExitCode -ne 0) { throw ('curl download failed with exit code ' + $result.ExitCode) }
 }
 try {
     Add-Content -LiteralPath $logFile -Value ('LuaTools download log for app %s from %s')
@@ -332,7 +341,7 @@ try {
     Add-Content -LiteralPath $logFile -Value $_.ScriptStackTrace
     Write-State 'failed' $_.Exception.Message
 }
-]==], powershell_quote(log_file), powershell_quote(state_file), tostring(appid), source.name, download_command, powershell_quote(download_path), powershell_quote(extract_path), powershell_quote(tostring(appid) .. ".lua"), powershell_quote(lua_path), powershell_quote(depot_path))
+]==], powershell_quote(network_script), powershell_quote(log_file), powershell_quote(state_file), tostring(appid), source.name, download_command, powershell_quote(download_path), powershell_quote(extract_path), powershell_quote(tostring(appid) .. ".lua"), powershell_quote(lua_path), powershell_quote(depot_path))
 
     m_utils.write_file(script_path, script)
     if not powershell.start_hidden(script_path) then return false, "Could not start download worker" end

@@ -1,35 +1,18 @@
-local millennium = require("millennium")
 local fs = require("fs")
 local utils = require("utils")
 local json = require("json")
 local powershell = require("powershell")
 
 local auth = {}
-local script_path
-
-local function directory()
-    local root = utils.getenv("LOCALAPPDATA")
-    if not root or root == "" then return nil end
-    return fs.join(root, "LuaToolsPlugin")
-end
 
 function auth.worker_path()
-    if script_path then return script_path end
-    local root = directory()
-    if not root then return nil, "Could not find local application data" end
-    if not fs.exists(root) then fs.create_directories(root) end
-
-    local script = millennium.assets.read("backend/auth.ps1")
-    if not script then return nil, "LuaTools login worker is unavailable" end
-    local path = fs.join(root, "auth.ps1")
-    local written = utils.write_file(path, script)
-    if not written then return nil, "Could not write LuaTools login worker" end
-    script_path = path
-    return path
+    local network_script, message = powershell.worker_script("network.ps1")
+    if not network_script then return nil, message end
+    return powershell.worker_script("auth.ps1")
 end
 
 function auth.status()
-    local root = directory()
+    local root = powershell.data_directory()
     local content = root and utils.read_file(fs.join(root, "status.json"))
     local success, status = pcall(json.decode, content or "")
     if not success or type(status) ~= "table" then return { status = "signed_out" } end

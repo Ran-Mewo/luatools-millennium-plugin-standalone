@@ -6,7 +6,7 @@ author = "LuaTools"
 description = "LuaTools Steam Plugin"
 
 [assets]
-resources = ["public/luatools-icon.png", "public/themes/themes.json", "backend/auth.ps1"]
+resources = ["public/luatools-icon.png", "public/themes/themes.json", "backend/auth.ps1", "backend/network.ps1"]
 
 [backend]
 entry = "backend/main.lua"

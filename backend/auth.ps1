@@ -3,7 +3,7 @@ param([ValidateSet('Initialize', 'SignIn', 'SignOut')][string]$Action)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Security
 Add-Type -AssemblyName System.Web
-Add-Type -AssemblyName System.Net.Http
+. (Join-Path $PSScriptRoot 'network.ps1')
 
 $authRoot = Join-Path $env:LOCALAPPDATA 'LuaToolsPlugin'
 $authFile = Join-Path $authRoot 'auth.dat'
@@ -61,18 +61,21 @@ function Save-AuthSession($session) {
 }
 
 function Request-AuthToken($grant, $body) {
+    $responseFile = Join-Path $authRoot ([IO.Path]::GetRandomFileName())
+    $statusCode = 0
     try {
-        return Invoke-RestMethod -Method Post -Uri ($supabaseUrl + '/auth/v1/token?grant_type=' + $grant) -Headers @{ apikey = $supabaseKey } -ContentType 'application/json' -Body ($body | ConvertTo-Json -Compress) -TimeoutSec 30
-    } catch {
-        $statusCode = 0
-        if ($_.Exception.Response) { $statusCode = [int]$_.Exception.Response.StatusCode }
-        if ($grant -eq 'refresh_token' -and $statusCode -in @(400, 401, 403)) {
-            Remove-Item -LiteralPath $authFile -Force -ErrorAction SilentlyContinue
-            Write-AuthStatus 'signed_out'
-            throw 'Your LuaTools session expired. Sign in again from Settings.'
-        }
-        throw 'Could not contact the LuaTools login server. Please try again.'
+        $result = Invoke-Curl ($supabaseUrl + '/auth/v1/token?grant_type=' + $grant) @('--silent', '--max-time', '30', '--request', 'POST', '--header', ('apikey: ' + $supabaseKey), '--header', 'content-type: application/json', '--data-binary', '@-', '--output', $responseFile, '--write-out', '%{http_code}') ($body | ConvertTo-Json -Compress)
+        if ($result.ExitCode -eq 0) { $statusCode = [int]$result.Output }
+        if ($statusCode -ge 200 -and $statusCode -lt 300) { return [IO.File]::ReadAllText($responseFile) | ConvertFrom-Json }
+    } finally {
+        Remove-Item -LiteralPath $responseFile -Force -ErrorAction SilentlyContinue
     }
+    if ($grant -eq 'refresh_token' -and $statusCode -in @(400, 401, 403)) {
+        Remove-Item -LiteralPath $authFile -Force -ErrorAction SilentlyContinue
+        Write-AuthStatus 'signed_out'
+        throw 'Your LuaTools session expired. Sign in again from Settings.'
+    }
+    throw 'Could not contact the LuaTools login server. Please try again.'
 }
 
 function Get-AuthSession([switch]$ForceRefresh) {
@@ -188,37 +191,14 @@ function Start-BrowserSignIn {
 function Invoke-LuaToolsDownload($url, $destination) {
     $uri = [Uri]$url
     if ($uri.Scheme -ne 'https' -or $uri.Authority -ne 'lua.tools' -or $uri.AbsolutePath -ne '/api/manifest/download' -or $uri.UserInfo) { throw 'Invalid LuaTools download URL.' }
-    $client = New-Object Net.Http.HttpClient
-    $client.Timeout = [TimeSpan]::FromMinutes(5)
-    try {
-        for ($attempt = 0; $attempt -lt 2; $attempt++) {
-            $token = Get-LuaToolsToken -ForceRefresh:($attempt -gt 0)
-            $request = New-Object Net.Http.HttpRequestMessage([Net.Http.HttpMethod]::Get, $uri)
-            $request.Headers.Authorization = New-Object Net.Http.Headers.AuthenticationHeaderValue('Bearer', $token)
-            $response = $null
-            try {
-                $response = $client.SendAsync($request, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
-                if ([int]$response.StatusCode -eq 401 -and $attempt -eq 0) { continue }
-                if (-not $response.IsSuccessStatusCode) { throw ('LuaTools download failed (HTTP ' + [int]$response.StatusCode + '). Check your account and download allowance on lua.tools.') }
-                $downloadStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-                $stream = [IO.File]::Create($destination)
-                $timeout = New-Object Threading.CancellationTokenSource
-                $timeout.CancelAfter([TimeSpan]::FromMinutes(5))
-                try {
-                    $downloadStream.CopyToAsync($stream, 81920, $timeout.Token).GetAwaiter().GetResult()
-                } finally {
-                    $downloadStream.Dispose()
-                    $stream.Dispose()
-                    $timeout.Dispose()
-                }
-                return
-            } finally {
-                if ($response) { $response.Dispose() }
-                $request.Dispose()
-            }
-        }
-    } finally {
-        $client.Dispose()
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $token = Get-LuaToolsToken -ForceRefresh:($attempt -gt 0)
+        $result = Invoke-Curl $url @('--silent', '--location', '--max-time', '300', '--header', ('Authorization: Bearer ' + $token), '--output', $destination, '--write-out', '%{http_code}')
+        if ($result.ExitCode -ne 0) { throw ('Could not reach lua.tools (curl exit code ' + $result.ExitCode + ').') }
+        $statusCode = [int]$result.Output
+        if ($statusCode -eq 401 -and $attempt -eq 0) { continue }
+        if ($statusCode -lt 200 -or $statusCode -ge 300) { throw ('LuaTools download failed (HTTP ' + $statusCode + '). Check your account and download allowance on lua.tools.') }
+        return
     }
 }
 
