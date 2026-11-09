@@ -2549,6 +2549,29 @@
   let lastButtonCheckTime = 0;
   const BUTTON_CHECK_THROTTLE = 500; // Only run once every 500ms
 
+  // Steam's hashed class names change on every store build, so find the menu bar's right-hand group (Search / Wishlist / Cart) by structure.
+  function findStoreHeaderContainer() {
+    const rightGroup = function (nav) {
+      const last = nav.lastElementChild;
+      return last && last.tagName === "DIV" ? last : null;
+    };
+    const roots = document.querySelectorAll('[data-featuretarget^="store-menu"]');
+    for (let i = 0; i < roots.length; i++) {
+      const nav = roots[i].querySelector('[role="navigation"]');
+      const group = nav && rightGroup(nav);
+      if (group) return group;
+    }
+    // Other role="navigation" menus on the page link to Wishlist/Cart too, but not as direct children.
+    const navs = document.querySelectorAll('[role="navigation"]');
+    for (let i = 0; i < navs.length; i++) {
+      const group = rightGroup(navs[i]);
+      if (group && group.querySelector(':scope > a[href*="/wishlist/"], :scope > a[href*="/cart/"]')) {
+        return group;
+      }
+    }
+    return null;
+  }
+
   function addLuaToolsButton(force) {
     // Throttle to prevent blocking gamepad input. Bypassed (force=true) for retry- and
     // observer-driven calls that fire the moment a container appears — those must not be
@@ -2577,12 +2600,8 @@
     }
 
     // Store Header Button Logic (always visible)
-    const headerContainer = document.querySelector("._1wn1lBlAzl3HMRqS1llwie");
-    if (
-      headerContainer &&
-      !document.querySelector(".luatools-header-button") &&
-      !window.__LuaToolsHeaderInserted
-    ) {
+    const headerContainer = findStoreHeaderContainer();
+    if (headerContainer && !document.querySelector(".luatools-header-button")) {
       ensureLuaToolsStyles();
       const headerBtn = document.createElement("button");
       headerBtn.type = "button";
@@ -2965,7 +2984,7 @@
   }
 
   // Retry addLuaToolsButton() until its DOM containers exist, instead of the previous single silent
-  // no-op attempt. Steam's own page JS can still be building out ._1wn1lBlAzl3HMRqS1llwie (header) and
+  // no-op attempt. Steam's own page JS can still be building out the store menu (header) and
   // .apphub_OtherSiteInfo (store button) when our script first runs — a one-shot attempt would just miss
   // them, and nothing else ever retried (checkUrlChange only re-fires on an actual URL change, not on
   // "containers appeared since last try"). Spaced past BUTTON_CHECK_THROTTLE (500ms) so each retry
@@ -3066,23 +3085,12 @@
       }
     }, 500);
 
-    // Ask backend if there is a queued startup message from InitApis
     try {
       if (
         typeof Millennium !== "undefined" &&
         typeof Millennium.callServerMethod === "function"
       ) {
-        Millennium.callServerMethod("luatools", "GetInitApisMessage", {
-          contentScriptQuery: "",
-        }).then(function (res) {
-          try {
-            const payload = typeof res === "string" ? JSON.parse(res) : res;
-            if (payload && payload.message) {
-              ShowLuaToolsAlert("LuaTools", String(payload.message));
-            }
-          } catch (_) {}
-        });
-        // Also show loaded apps list if present (only once per session, store page only)
+        // Show loaded apps list if present (only once per session, store page only)
         try {
           if (window.location.hostname === "store.steampowered.com") {
             if (!sessionStorage.getItem("LuaToolsLoadedAppsGate")) {
@@ -3236,8 +3244,8 @@
           !document.querySelector(".luatools-button") &&
           window.__LuaToolsGameAdded !== true;
         var needHeaderBtn =
-          !!document.querySelector("._1wn1lBlAzl3HMRqS1llwie") &&
-          !document.querySelector(".luatools-header-button");
+          !document.querySelector(".luatools-header-button") &&
+          !!findStoreHeaderContainer();
         if (needGameBtn || needHeaderBtn) {
           updateButtonTranslations();
           addLuaToolsButton(true);
